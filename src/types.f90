@@ -2510,6 +2510,7 @@ END TYPE GENERATED_MESH_ELLIPSOID_TYPE
   TYPE FORWARD_EULER_DAE_SOLVER_TYPE
     TYPE(EULER_DAE_SOLVER_TYPE), POINTER :: EULER_DAE_SOLVER !<A pointer to the differential-algebraic solver
     INTEGER(INTG) :: SOLVER_LIBRARY !<The library type for the forward Euler differential-algebraic equation solver \see SOLVER_ROUTINES_SolverLibraries,SOLVER_ROUTINES
+    INTEGER(INTG) :: TIME_STEPS_NUMBER !<The number of time steps to use. '-1' if not set - then the method will fit the given step size to the total amount of simulated time.
   END TYPE FORWARD_EULER_DAE_SOLVER_TYPE
 
   !>Contains information for an backward Euler differential-algebraic equation solver
@@ -2522,6 +2523,7 @@ END TYPE GENERATED_MESH_ELLIPSOID_TYPE
   TYPE IMPROVED_EULER_DAE_SOLVER_TYPE
     TYPE(EULER_DAE_SOLVER_TYPE), POINTER :: EULER_DAE_SOLVER !<A pointer to the differential-algebraic solver
     INTEGER(INTG) :: SOLVER_LIBRARY !<The library type for the improved Euler differential-algebraic equation solver \see SOLVER_ROUTINES_SolverLibraries,SOLVER_ROUTINES
+    INTEGER(INTG) :: TIME_STEPS_NUMBER !<The number of time steps to use. '-1' if not set - then the method will fit the given step size to the total amount of simulated time.
   END TYPE IMPROVED_EULER_DAE_SOLVER_TYPE
   
   !>Contains information for an Euler differential-algebraic equation solver
@@ -2556,7 +2558,17 @@ END TYPE GENERATED_MESH_ELLIPSOID_TYPE
   TYPE BDF_DAE_SOLVER_TYPE
     TYPE(DAE_SOLVER_TYPE), POINTER :: DAE_SOLVER !<A pointer to the differential-algebraic solver
     INTEGER(INTG) :: SOLVER_LIBRARY !<The library type for the BDF differential-algebraic equation solver \see SOLVER_ROUTINES_SolverLibraries,SOLVER_ROUTINES
+    REAL(DP) :: RELATIVE_TOLERANCE !<The relative tolerance, the user expects to get from the SUNDIALS library
+    REAL(DP) :: ABSOLUTE_TOLERANCE !<The absolute tolerance, the user expects to get from the SUNDIALS library
   END TYPE BDF_DAE_SOLVER_TYPE
+
+  !>Contains information for a GL differential-algebraic equation solver
+  TYPE GL_DAE_SOLVER_TYPE
+    TYPE(DAE_SOLVER_TYPE), POINTER :: DAE_SOLVER !<A pointer to the differential-algebraic solver
+    INTEGER(INTG) :: SOLVER_LIBRARY !<The library type for the GL differential-algebraic equation solver \see SOLVER_ROUTINES_SolverLibraries,SOLVER_ROUTINES
+    !REAL(DP) :: RELATIVE_TOLERANCE !The relative tolerance, the user expects to get
+    !REAL(DP) :: ABSOLUTE_TOLERANCE !The absolute tolerance, the user expects to get
+  END TYPE GL_DAE_SOLVER_TYPE
   
   !>Contains information for a Rush-Larson differential-algebraic equation solver
   TYPE RUSH_LARSON_DAE_SOLVER_TYPE
@@ -2582,6 +2594,7 @@ END TYPE GENERATED_MESH_ELLIPSOID_TYPE
     TYPE(RUNGE_KUTTA_DAE_SOLVER_TYPE), POINTER :: RUNGE_KUTTA_SOLVER !<A pointer to information for a Runge-Kutta solver
     TYPE(ADAMS_MOULTON_DAE_SOLVER_TYPE), POINTER :: ADAMS_MOULTON_SOLVER !<A pointer to information for an Adams-Moulton solver
     TYPE(BDF_DAE_SOLVER_TYPE), POINTER :: BDF_SOLVER !<A pointer to information for a BDF solver
+    TYPE(GL_DAE_SOLVER_TYPE), POINTER :: GL_SOLVER !<A pointer to information for a GL solver
     TYPE(RUSH_LARSON_DAE_SOLVER_TYPE), POINTER :: RUSH_LARSON_SOLVER !<A pointer to information for a Rush-Larson solver
     TYPE(EXTERNAL_DAE_SOLVER_TYPE), POINTER :: EXTERNAL_SOLVER !<A pointer to information for an external solver
   END TYPE DAE_SOLVER_TYPE
@@ -3274,7 +3287,6 @@ END TYPE GENERATED_MESH_ELLIPSOID_TYPE
   !
   !================================================================================================================================
   !
-
-
+ CONTAINS
 END MODULE TYPES
 

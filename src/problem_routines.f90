@@ -47,6 +47,7 @@ MODULE PROBLEM_ROUTINES
   USE BASE_ROUTINES
   USE BIOELECTRIC_ROUTINES
   USE CLASSICAL_FIELD_ROUTINES
+  USE COMP_ENVIRONMENT
   USE CONTROL_LOOP_ROUTINES
   USE DISTRIBUTED_MATRIX_VECTOR
   USE ELASTICITY_ROUTINES
@@ -78,12 +79,12 @@ MODULE PROBLEM_ROUTINES
   IMPLICIT NONE
 
   PRIVATE
+#include "mpif.h"
 
   ! Timing variables
-  REAL(DP), PUBLIC :: TIMING_ODE_SOLVER = 0_DP
   REAL(DP), PUBLIC :: TIMING_PARABOLIC_SOLVER = 0_DP
   REAL(DP), PUBLIC :: TIMING_FE_SOLVER = 0_DP
-
+  
   !Module parameters
 
   !Module types
@@ -475,7 +476,7 @@ CONTAINS
     IF(ASSOCIATED(CONTROL_LOOP)) THEN
       IF(CONTROL_LOOP%CONTROL_LOOP_FINISHED) THEN
         !Solve this control loop
-        IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT) THEN
+        IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT .AND. COMPUTATIONAL_NODE_NUMBER_GET(ERR,ERROR) == 0) THEN
           CALL WRITE_STRING(GENERAL_OUTPUT_TYPE,"",ERR,ERROR,*999)
           CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"Control loop: ",CONTROL_LOOP%LABEL,ERR,ERROR,*999)
           CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"  Control loop level = ",CONTROL_LOOP%CONTROL_LOOP_LEVEL,ERR,ERROR,*999)
@@ -485,7 +486,7 @@ CONTAINS
         CASE(PROBLEM_CONTROL_SIMPLE_TYPE)
           SIMPLE_LOOP=>CONTROL_LOOP%SIMPLE_LOOP
           IF(ASSOCIATED(SIMPLE_LOOP)) THEN
-            IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT) THEN
+            IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT .AND. COMPUTATIONAL_NODE_NUMBER_GET(ERR,ERROR) == 0) THEN
               CALL WRITE_STRING(GENERAL_OUTPUT_TYPE,"",ERR,ERROR,*999)
               CALL WRITE_STRING(GENERAL_OUTPUT_TYPE,"Simple control loop: ",ERR,ERROR,*999)
             ENDIF
@@ -518,7 +519,7 @@ CONTAINS
           FIXED_LOOP=>CONTROL_LOOP%FIXED_LOOP
           IF(ASSOCIATED(FIXED_LOOP)) THEN
             DO iteration_idx=FIXED_LOOP%START_ITERATION,FIXED_LOOP%STOP_ITERATION,FIXED_LOOP%ITERATION_INCREMENT
-              IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT) THEN
+              IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT .AND. COMPUTATIONAL_NODE_NUMBER_GET(ERR,ERROR) == 0) THEN
                 CALL WRITE_STRING(GENERAL_OUTPUT_TYPE,"",ERR,ERROR,*999)
                 CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"Fixed control loop iteration: ",iteration_idx,ERR,ERROR,*999)
               ENDIF
@@ -557,7 +558,7 @@ CONTAINS
             TIME_LOOP%ITERATION_NUMBER=0
             ! actual time loop
             DO WHILE(TIME_LOOP%CURRENT_TIME<TIME_LOOP%STOP_TIME)
-              IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT) THEN
+              IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT .AND. COMPUTATIONAL_NODE_NUMBER_GET(ERR,ERROR) == 0) THEN
                 CALL WRITE_STRING(GENERAL_OUTPUT_TYPE,"",ERR,ERROR,*999)
                 CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"Time control loop iteration: ",TIME_LOOP%ITERATION_NUMBER, &
                   & ERR,ERROR,*999)
@@ -570,7 +571,11 @@ CONTAINS
               ENDIF
 
 #ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStart("1.1/2 pre solve")
+              IF (CONTROL_LOOP%NUMBER_OF_SUB_LOOPS>0) THEN
+                CALL CustomProfilingStart("level 1: MAIN_TIME_LOOP overhead")
+              ELSE
+                CALL CustomProfilingStart("level 1: MONODOMAIN_TIME_LOOP overhead")
+              ENDIF
 #endif
 
 #ifdef TAUPROF
@@ -584,7 +589,11 @@ CONTAINS
 #endif
 
 #ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStop("1.1/2 pre solve")
+              IF (CONTROL_LOOP%NUMBER_OF_SUB_LOOPS>0) THEN
+                CALL CustomProfilingStop("level 1: MAIN_TIME_LOOP overhead")
+              ELSE
+                CALL CustomProfilingStop("level 1: MONODOMAIN_TIME_LOOP overhead")
+              ENDIF
 #endif
 
               IF(CONTROL_LOOP%NUMBER_OF_SUB_LOOPS==0) THEN
@@ -594,8 +603,27 @@ CONTAINS
                   DO solver_idx=1,SOLVERS%NUMBER_OF_SOLVERS
                     SOLVER=>SOLVERS%SOLVERS(solver_idx)%PTR
                     
+#ifdef USE_CUSTOM_PROFILING
+                    IF (SOLVERS%NUMBER_OF_SOLVERS == 2) THEN      ! if this is the MONODOMAIN_TIME_LOOP
+                      IF (solver_idx == 1) THEN
+                        CALL CustomProfilingStart("level 1: SolverDAE solve")
+                      ELSE
+                        CALL CustomProfilingStart("level 1: SolverParabolic solve")
+                      ENDIF
+                    ENDIF
+#endif                    
+                    
                     CALL PROBLEM_SOLVER_SOLVE(SOLVER,ERR,ERROR,*999)
                     
+#ifdef USE_CUSTOM_PROFILING
+                    IF (SOLVERS%NUMBER_OF_SOLVERS == 2) THEN      ! if this is the MONODOMAIN_TIME_LOOP
+                      IF (solver_idx == 1) THEN
+                        CALL CustomProfilingStop("level 1: SolverDAE solve")
+                      ELSE
+                        CALL CustomProfilingStop("level 1: SolverParabolic solve")
+                      ENDIF
+                    ENDIF
+#endif                    
                   ENDDO !solver_idx
                 ELSE
                   CALL FlagError("Control loop solvers is not associated.",ERR,ERROR,*999)
@@ -609,14 +637,15 @@ CONTAINS
               ENDIF
 
 #ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStart("1.1/2 post solve (file output)")
+              ! if this is not the main loop
+              IF(CONTROL_LOOP%NUMBER_OF_SUB_LOOPS==0) THEN
+                CALL CustomProfilingStart("level 1: file output")
+              ENDIF
 #endif
 
 #ifdef TAUPROF
               CALL TAU_STATIC_PHASE_START('1.1/2 post solve (file output)')
 #endif
-
-
               !Perform any post loop actions (e.g. file output)
               CALL PROBLEM_CONTROL_LOOP_POST_LOOP(CONTROL_LOOP,ERR,ERROR,*999)
 
@@ -625,7 +654,9 @@ CONTAINS
 #endif
 
 #ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStop("1.1/2 post solve (file output)")
+              IF(CONTROL_LOOP%NUMBER_OF_SUB_LOOPS==0) THEN
+                CALL CustomProfilingStop("level 1: file output")
+              ENDIF
 #endif
 
               !Increment loop counter and time
@@ -644,7 +675,7 @@ CONTAINS
             DO WHILE(WHILE_LOOP%CONTINUE_LOOP.AND.WHILE_LOOP%ITERATION_NUMBER &
               & <WHILE_LOOP%MAXIMUM_NUMBER_OF_ITERATIONS)
               WHILE_LOOP%ITERATION_NUMBER=WHILE_LOOP%ITERATION_NUMBER+1
-              IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT) THEN
+              IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT .AND. COMPUTATIONAL_NODE_NUMBER_GET(ERR,ERROR) == 0) THEN
                 CALL WRITE_STRING(GENERAL_OUTPUT_TYPE,"",ERR,ERROR,*999)
                 CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"While control loop iteration: ",WHILE_LOOP%ITERATION_NUMBER, &
                   & ERR,ERROR,*999)
@@ -694,7 +725,7 @@ CONTAINS
               ! fixed number of steps
               DO WHILE(LOAD_INCREMENT_LOOP%ITERATION_NUMBER<LOAD_INCREMENT_LOOP%MAXIMUM_NUMBER_OF_ITERATIONS)
                 LOAD_INCREMENT_LOOP%ITERATION_NUMBER=LOAD_INCREMENT_LOOP%ITERATION_NUMBER+1
-                IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT) THEN
+                IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT .AND. COMPUTATIONAL_NODE_NUMBER_GET(ERR,ERROR) == 0) THEN
                   CALL WRITE_STRING(GENERAL_OUTPUT_TYPE,"",ERR,ERROR,*999)
                   CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"Load increment control loop iteration: ", &
                     & LOAD_INCREMENT_LOOP%ITERATION_NUMBER,ERR,ERROR,*999)
@@ -706,11 +737,11 @@ CONTAINS
                 CALL TAU_STATIC_PHASE_START('1.3.1 pre solve')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStart("1.3.1 pre solve")
+                CALL CustomProfilingStart("level 1: interpolate 1D->3D")   ! at this point only reached by FE solver
 #endif
                 CALL PROBLEM_CONTROL_LOOP_PRE_LOOP(CONTROL_LOOP,ERR,ERROR,*999)
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStop("1.3.1 pre solve")
+                CALL CustomProfilingStop("level 1: interpolate 1D->3D")   ! at this point only reached by FE solver
 #endif
 
 #ifdef TAUPROF
@@ -729,13 +760,13 @@ CONTAINS
                           CALL TAU_STATIC_PHASE_START('1.3.2 apply incremented BC')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-                          CALL CustomProfilingStart("1.3.2 apply incremented BC")
+                          CALL CustomProfilingStart("level 1: ELASTICITY_LOOP overhead")
 #endif
                           !Apply incremented boundary conditions here =>
                           CALL PROBLEM_SOLVER_LOAD_INCREMENT_APPLY(SOLVER%SOLVER_EQUATIONS,LOAD_INCREMENT_LOOP%ITERATION_NUMBER, &
                             & LOAD_INCREMENT_LOOP%MAXIMUM_NUMBER_OF_ITERATIONS,ERR,ERROR,*999)
 #ifdef USE_CUSTOM_PROFILING
-                          CALL CustomProfilingStop("1.3.2 apply incremented BC")
+                          CALL CustomProfilingStop("level 1: ELASTICITY_LOOP overhead")
 #endif
 
 #ifdef TAUPROF
@@ -747,11 +778,11 @@ CONTAINS
                         CALL TAU_STATIC_PHASE_START('1.3.3 solve')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-                        CALL CustomProfilingStart("1.3.3 solve")
+                        CALL CustomProfilingStart("level 1: SolverFE solve")
 #endif
                         CALL PROBLEM_SOLVER_SOLVE(SOLVER,ERR,ERROR,*999)
 #ifdef USE_CUSTOM_PROFILING
-                        CALL CustomProfilingStop("1.3.3 solve")
+                        CALL CustomProfilingStop("level 1: SolverFE solve")
 #endif
 #ifdef TAUPROF
                         CALL TAU_STATIC_PHASE_STOP('1.3.3 solve')
@@ -775,11 +806,11 @@ CONTAINS
                 CALL TAU_STATIC_PHASE_START('1.3.4 post solve (file output)')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStart("1.3.4 post solve (file output)")
+                CALL CustomProfilingStart("level 1: interpolate 3D->1D")
 #endif
                 CALL PROBLEM_CONTROL_LOOP_POST_LOOP(CONTROL_LOOP,ERR,ERROR,*999)
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStop("1.3.4 post solve (file output)")
+                CALL CustomProfilingStop("level 1: interpolate 3D->1D")
 #endif
 
 #ifdef TAUPROF
@@ -2438,7 +2469,7 @@ CONTAINS
     TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
     !Local Variables
     TYPE(VARYING_STRING) :: LOCAL_ERROR
-    REAL(DP) :: TIME1, TIME2
+    REAL(DP) :: TIME1(1), TIME2(1)
 
     ENTERS("PROBLEM_SOLVER_EQUATIONS_SOLVE",ERR,ERROR,*999)
     
@@ -2451,25 +2482,27 @@ CONTAINS
             CALL Problem_SolverEquationsStaticLinearSolve(SOLVER_EQUATIONS,ERR,ERROR,*999)
           CASE(SOLVER_EQUATIONS_NONLINEAR)
 
-            CALL CPU_TIME(TIME1)
+            !CALL CPU_TIMER(USER_CPU, TIME1, ERR,ERROR,*999)
+            TIME1(1) = MPI_WTIME()
 
 #ifdef TAUPROF
             CALL TAU_STATIC_PHASE_START('1.3.3.1 static nonlinear solve (*)')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-            CALL CustomProfilingStart("1.3.3.1 static nonlinear solve (*)")
+            CALL CustomProfilingStart("level 2: 3D solve")
 #endif
             CALL Problem_SolverEquationsStaticNonlinearSolve(SOLVER_EQUATIONS,ERR,ERROR,*999)
 
 #ifdef USE_CUSTOM_PROFILING
-            CALL CustomProfilingStop("1.3.3.1 static nonlinear solve (*)")
+            CALL CustomProfilingStop("level 2: 3D solve")
 #endif
 
 #ifdef TAUPROF
             CALL TAU_STATIC_PHASE_STOP('1.3.3.1 static nonlinear solve (*)')
 #endif
-            CALL CPU_TIME(TIME2)
-            TIMING_FE_SOLVER = TIMING_FE_SOLVER + (TIME2 - TIME1)
+            !CALL CPU_TIMER(USER_CPU, TIME2, ERR,ERROR,*999)
+            TIME2(1) = MPI_WTIME()
+            TIMING_FE_SOLVER = TIMING_FE_SOLVER + (TIME2(1) - TIME1(1))
 
 
           CASE DEFAULT
@@ -2491,25 +2524,27 @@ CONTAINS
         CASE(SOLVER_EQUATIONS_FIRST_ORDER_DYNAMIC,SOLVER_EQUATIONS_SECOND_ORDER_DYNAMIC)
           SELECT CASE(SOLVER_EQUATIONS%LINEARITY)
           CASE(SOLVER_EQUATIONS_LINEAR)
-            CALL CPU_TIME(TIME1)
+            !CALL CPU_TIMER(USER_CPU, TIME1, ERR,ERROR,*999)
+            TIME1(1) = MPI_WTIME()
 #ifdef TAUPROF
             CALL TAU_STATIC_PHASE_START('1.2. dynamic linear solve (*)')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-            CALL CustomProfilingStart("1.2. dynamic linear solve (*)")
+            CALL CustomProfilingStart("level 2: 1D solve")
 #endif
 
             CALL Problem_SolverEquationsDynamicLinearSolve(SOLVER_EQUATIONS,ERR,ERROR,*999)
 
 #ifdef USE_CUSTOM_PROFILING
-            CALL CustomProfilingStop("1.2. dynamic linear solve (*)")
+            CALL CustomProfilingStop("level 2: 1D solve")
 #endif
 
 #ifdef TAUPROF
             CALL TAU_STATIC_PHASE_STOP('1.2. dynamic linear solve (*)')
 #endif
-            CALL CPU_TIME(TIME2)
-            TIMING_PARABOLIC_SOLVER = TIMING_PARABOLIC_SOLVER + (TIME2 - TIME1)
+            !CALL CPU_TIMER(USER_CPU, TIME2, ERR,ERROR,*999)
+            TIME2(1) = MPI_WTIME()
+            TIMING_PARABOLIC_SOLVER = TIMING_PARABOLIC_SOLVER + (TIME2(1) - TIME1(1))
 
           CASE(SOLVER_EQUATIONS_NONLINEAR)
             CALL Problem_SolverEquationsDynamicNonlinearSolve(SOLVER_EQUATIONS,ERR,ERROR,*999)
@@ -2571,26 +2606,27 @@ CONTAINS
 #ifdef TAUPROF
               CALL TAU_STATIC_PHASE_START('1.2.1 assemble equations')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStart("1.2.1 assemble equations")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!              CALL CustomProfilingStart("1.2.1 assemble equations")
+!#endif
               !Make sure the equations sets are up to date
               DO equations_set_idx=1,SOLVER_MAPPING%NUMBER_OF_EQUATIONS_SETS
                 EQUATIONS_SET=>SOLVER_MAPPING%EQUATIONS_SETS(equations_set_idx)%PTR
                 !Assemble the equations for linear problems
+                ! assemble FEM stiffness matrix and right hand side
                 CALL EQUATIONS_SET_ASSEMBLE(EQUATIONS_SET,ERR,ERROR,*999)
               ENDDO !equations_set_idx
 
-#ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStop("1.2.1 assemble equations")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!              CALL CustomProfilingStop("1.2.1 assemble equations")
+!#endif
 #ifdef TAUPROF
               CALL TAU_STATIC_PHASE_STOP('1.2.1 assemble equations')
               CALL TAU_STATIC_PHASE_START('1.2.2 get loop time')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStart("1.2.2 get loop time")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!              CALL CustomProfilingStart("1.2.2 get loop time")
+!#endif
 
               !Get current control loop times. The control loop may be a sub loop below a time loop, so iterate up
               !through loops checking for the time loop
@@ -2610,31 +2646,31 @@ CONTAINS
               !Set the solver time
               CALL SOLVER_DYNAMIC_TIMES_SET(SOLVER,CURRENT_TIME,TIME_INCREMENT,ERR,ERROR,*999)
 
-#ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStop("1.2.2 get loop time")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!              CALL CustomProfilingStop("1.2.2 get loop time")
+!#endif
 
 #ifdef TAUPROF
               CALL TAU_STATIC_PHASE_STOP('1.2.2 get loop time')
               CALL TAU_STATIC_PHASE_START('1.2.3 solve')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStart("1.2.3 solve")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!              CALL CustomProfilingStart("1.2.3 solve")
+!#endif
 
               !Solve for the next time i.e., current time + time increment
               CALL SOLVER_SOLVE(SOLVER,ERR,ERROR,*999)
 
-#ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStop("1.2.3 solve")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!              CALL CustomProfilingStop("1.2.3 solve")
+!#endif
 #ifdef TAUPROF
               CALL TAU_STATIC_PHASE_STOP('1.2.3 solve')
               CALL TAU_STATIC_PHASE_START('1.2.4 back-substitute')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStart("1.2.4 back-substitute")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!              CALL CustomProfilingStart("1.2.4 back-substitute")
+!#endif
 
               !Back-substitute to find flux values for linear problems
               DO equations_set_idx=1,SOLVER_MAPPING%NUMBER_OF_EQUATIONS_SETS
@@ -2642,9 +2678,9 @@ CONTAINS
                 CALL EQUATIONS_SET_BACKSUBSTITUTE(EQUATIONS_SET,SOLVER_EQUATIONS%BOUNDARY_CONDITIONS,ERR,ERROR,*999)
               ENDDO !equations_set_idx
 
-#ifdef USE_CUSTOM_PROFILING
-              CALL CustomProfilingStop("1.2.4 back-substitute")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!              CALL CustomProfilingStop("1.2.4 back-substitute")
+!#endif
 #ifdef TAUPROF
               CALL TAU_STATIC_PHASE_STOP('1.2.4 back-substitute')
 #endif
@@ -3046,6 +3082,7 @@ CONTAINS
         SOLVER_MAPPING=>SOLVER_EQUATIONS%SOLVER_MAPPING
         IF(ASSOCIATED(SOLVER_MAPPING)) THEN
           !Apply boundary conditition
+          !PRINT*, "In Problem_SolverEquationsStaticNonlinearSolve: problem_routines.f90: 3049"
           !PRINT*, "Apply boundary conditition"
 
 #ifdef TAUPROF
@@ -3053,16 +3090,16 @@ CONTAINS
 #endif
 
 #ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStart("1.3.3.1.1 apply BC, assemble")
+          CALL CustomProfilingStart("level 3: 3D assembly")
 #endif
           DO equations_set_idx=1,SOLVER_MAPPING%NUMBER_OF_EQUATIONS_SETS
             EQUATIONS_SET=>SOLVER_MAPPING%EQUATIONS_SETS(equations_set_idx)%PTR
             !Assemble the equations set
             CALL EQUATIONS_SET_ASSEMBLE(EQUATIONS_SET,ERR,ERROR,*999)
           ENDDO !equations_set_idx
-#ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStop("1.3.3.1.1 apply BC, assemble")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!          CALL CustomProfilingStop("level 3: 3D equations set assemby")
+!#endif
 
 #ifdef TAUPROF
           CALL TAU_STATIC_PHASE_STOP('1.3.3.1.1 apply BC, assemble')
@@ -3074,9 +3111,9 @@ CONTAINS
 #ifdef TAUPROF
           CALL TAU_STATIC_PHASE_START('1.3.3.1.2 assemble interface conditions')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStart("1.3.3.1.2 assemble interface conditions")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!          CALL CustomProfilingStart("level 3: 3D assemby")
+!#endif
           DO interface_condition_idx=1,SOLVER_MAPPING%NUMBER_OF_INTERFACE_CONDITIONS
 #ifdef TAUPROF
             WRITE (CVAR,'(a8,i2)') 'Interface',interface_condition_idx
@@ -3091,7 +3128,7 @@ CONTAINS
           ENDDO !interface_condition_idx
 
 #ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStop("1.3.3.1.2 assemble interface conditions")
+          CALL CustomProfilingStop("level 3: 3D assembly")
 #endif
 
 #ifdef TAUPROF
@@ -3099,20 +3136,20 @@ CONTAINS
           CALL TAU_STATIC_PHASE_START('1.3.3.1.3 solve')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStart("1.3.3.1.3 solve")
+          CALL CustomProfilingStart("level 3: 3D solve")
 #endif
 
           !Solve
           CALL SOLVER_SOLVE(SOLVER,ERR,ERROR,*999)
 #ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStop("1.3.3.1.3 solve")
+          CALL CustomProfilingStop("level 3: 3D solve")
 #endif
 #ifdef TAUPROF
           CALL TAU_STATIC_PHASE_STOP('1.3.3.1.3 solve')
           CALL TAU_STATIC_PHASE_START('1.3.3.1.4 update residual')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStart("1.3.3.1.4 update residual")
+          CALL CustomProfilingStart("level 3: 3D other")
 #endif
 
           !Update the rhs field variable with residuals or backsubstitute for any linear
@@ -3135,7 +3172,7 @@ CONTAINS
           ENDDO !equations_set_idx
 
 #ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStop("1.3.3.1.4 update residual")
+          CALL CustomProfilingStop("level 3: 3D other")
 #endif
 #ifdef TAUPROF
           CALL TAU_STATIC_PHASE_STOP('1.3.3.1.4 update residual')
@@ -3186,11 +3223,12 @@ CONTAINS
       CALL TAU_STATIC_PHASE_START('problem_solver_pre_solve')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-      CALL CustomProfilingStart("problem_solver_pre_solve")
+      CALL CustomProfilingStart("level 2: solver overhead")     ! at this point reached by 0D and 1D solvers and 3D nonlinear solver
 #endif
       CALL PROBLEM_SOLVER_PRE_SOLVE(SOLVER,ERR,ERROR,*999)
+      
 #ifdef USE_CUSTOM_PROFILING
-      CALL CustomProfilingStop("problem_solver_pre_solve")
+      CALL CustomProfilingStop("level 2: solver overhead")    ! at this point reached by 0D and 1D solvers and 3D nonlinear solver
 #endif
 #ifdef TAUPROF
       CALL TAU_STATIC_PHASE_STOP('problem_solver_pre_solve')
@@ -3208,13 +3246,13 @@ CONTAINS
           CALL TAU_STATIC_PHASE_START('1.1. problem cellml solve')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStart("1.1. problem cellml solve")
+          CALL CustomProfilingStart("level 2: 0D solve")
 #endif
 
           CALL PROBLEM_CELLML_EQUATIONS_SOLVE(SOLVER%CELLML_EQUATIONS,ERR,ERROR,*999)
 
 #ifdef USE_CUSTOM_PROFILING
-          CALL CustomProfilingStop("1.1. problem cellml solve")
+          CALL CustomProfilingStop("level 2: 0D solve")
 #endif
 #ifdef TAUPROF
           CALL TAU_STATIC_PHASE_STOP('1.1. problem cellml solve')
@@ -3231,11 +3269,11 @@ CONTAINS
       CALL TAU_STATIC_PHASE_START('problem_solver_post_solve')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-      CALL CustomProfilingStart("problem_solver_post_solve")
+      CALL CustomProfilingStart("level 2: solver overhead")     ! at this point reached by 0D and 1D solvers
 #endif
       CALL PROBLEM_SOLVER_POST_SOLVE(SOLVER,ERR,ERROR,*999)
 #ifdef USE_CUSTOM_PROFILING
-      CALL CustomProfilingStop("problem_solver_post_solve")
+      CALL CustomProfilingStop("level 2: solver overhead")        ! at this point reached by 0D and 1D solvers
 #endif
 #ifdef TAUPROF
       CALL TAU_STATIC_PHASE_STOP('problem_solver_post_solve')

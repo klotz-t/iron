@@ -96,6 +96,7 @@ MODULE OpenCMISS_Iron
   USE ISO_VARYING_STRING
   USE KINDS
   USE MESH_ROUTINES
+  USE MPI
   USE NODE_ROUTINES
   USE PRINT_TYPES_ROUTINES
   USE PROBLEM_CONSTANTS
@@ -299,13 +300,11 @@ MODULE OpenCMISS_Iron
 
   !>Contains information about a solver.
   TYPE cmfe_SolverType
-    PRIVATE
     TYPE(SOLVER_TYPE), POINTER :: solver
   END TYPE cmfe_SolverType
 
   !>Contains information about the solver equations for a solver.
   TYPE cmfe_SolverEquationsType
-    PRIVATE
     TYPE(SOLVER_EQUATIONS_TYPE), POINTER :: solverEquations
   END TYPE cmfe_SolverEquationsType
 
@@ -410,9 +409,11 @@ MODULE OpenCMISS_Iron
 
   PUBLIC cmfe_SolverEquationsType,cmfe_SolverEquations_Finalise,cmfe_SolverEquations_Initialise
 
-  PUBLIC cmfe_CustomProfilingStart,cmfe_CustomProfilingStop,cmfe_CustomProfilingMemory,cmfe_CustomProfilingGetInfo, &
+  PUBLIC cmfe_OutputInterpolationParameters, cmfe_getFieldSize, cmfe_PrintElementsMapping, cmfe_PrintNodesMapping, &
+    & cmfe_PrintSolverEquationsM, &
+    & cmfe_CustomProfilingStart,cmfe_CustomProfilingStop,cmfe_CustomProfilingMemory,cmfe_CustomProfilingGetInfo, &
     & cmfe_CustomProfilingGetDuration,cmfe_CustomProfilingGetMemory,cmfe_CustomProfilingGetSizePerElement, &
-    & cmfe_CustomProfilingGetNumberObjects, cmfe_CustomProfilingGetEnabled
+    & cmfe_CustomProfilingGetNumberObjects, cmfe_CustomProfilingGetEnabled, cmfe_CustomProfilingReset
   PUBLIC cmfe_PrintMesh, cmfe_PrintFields, cmfe_PrintDistributedMatrix, cmfe_PrintRegion, cmfe_PrintMeshelementstype, &
     & cmfe_PrintInterfacepointsconnectivitytype, cmfe_PrintQuadrature, cmfe_PrintSolverEquations, cmfe_PrintNodes, &
     & cmfe_PrintDataPoints, cmfe_PrintSolver, cmfe_PrintField, cmfe_PrintCoordinateSystem, cmfe_PrintDataProjection, &
@@ -809,6 +810,8 @@ MODULE OpenCMISS_Iron
 
   PUBLIC CMFE_BASIS_LAGRANGE_HERMITE_TP_TYPE,CMFE_BASIS_SIMPLEX_TYPE,CMFE_BASIS_SERENDIPITY_TYPE,CMFE_BASIS_AUXILLIARY_TYPE, &
     & CMFE_BASIS_B_SPLINE_TP_TYPE,CMFE_BASIS_FOURIER_LAGRANGE_HERMITE_TP_TYPE,CMFE_BASIS_EXTENDED_LAGRANGE_TP_TYPE
+
+  PUBLIC cmfe_DomainTopologyNodeCheckExists
 
   PUBLIC CMFE_BASIS_LINEAR_LAGRANGE_INTERPOLATION,CMFE_BASIS_QUADRATIC_LAGRANGE_INTERPOLATION, &
     & CMFE_BASIS_CUBIC_LAGRANGE_INTERPOLATION, &
@@ -4106,6 +4109,8 @@ MODULE OpenCMISS_Iron
 
   PUBLIC cmfe_Fields_ElementsExport,cmfe_Fields_NodesExport
 
+  PUBLIC cmfe_ReadMeshInfo,cmfe_ReadMeshFiles,cmfe_ReadMeshFilesCubit
+
 !!==================================================================================================================================
 !!
 !! GENERATED_MESH_ROUTINES
@@ -4259,6 +4264,10 @@ MODULE OpenCMISS_Iron
     MODULE PROCEDURE cmfe_GeneratedMesh_SurfaceGetObj1
   END INTERFACE
 
+  !>Returns starting and stopping index of nodes belonging to a surface of given patch ID
+  INTERFACE cmfe_ImportedMesh_SurfaceGet
+    MODULE PROCEDURE cmfe_ImportedMesh_SurfaceGetNumber0
+  END INTERFACE
 
   !>Creates an embedding of one mesh in another
   INTERFACE cmfe_MeshEmbedding_Create
@@ -4333,7 +4342,7 @@ MODULE OpenCMISS_Iron
 
   PUBLIC cmfe_GeneratedMesh_GeometricParametersCalculate
 
-  PUBLIC cmfe_GeneratedMesh_SurfaceGet
+  PUBLIC cmfe_GeneratedMesh_SurfaceGet,cmfe_ImportedMesh_SurfaceGet
 
 
 !!==================================================================================================================================
@@ -5866,6 +5875,8 @@ MODULE OpenCMISS_Iron
   PUBLIC cmfe_Problem_SolversDestroy
 
   PUBLIC cmfe_Problem_SpecificationGet,cmfe_Problem_SpecificationSizeGet
+  
+  PUBLIC cmfe_CellML_IntermediateMaxNumberSet
 
 !!==================================================================================================================================
 !!
@@ -6176,8 +6187,10 @@ MODULE OpenCMISS_Iron
   INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_RUNGE_KUTTA = SOLVER_DAE_RUNGE_KUTTA !<Runge-Kutta differential-algebraic equation solver. \see
   INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_ADAMS_MOULTON = SOLVER_DAE_ADAMS_MOULTON !<Adams-Moulton differential-algebraic equation solver. \see
   INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_BDF = SOLVER_DAE_BDF !<General BDF differential-algebraic equation solver. \see
+  INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_GL = SOLVER_DAE_GL !<General Linear (GL) differential-algebraic equation solver. \see
   INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_RUSH_LARSON = SOLVER_DAE_RUSH_LARSON !<Rush-Larson differential-algebraic equation solver. \see
   INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_EXTERNAL = SOLVER_DAE_EXTERNAL !<External (e.g., CellML generated) differential-algebraic equation solver. \see
+
   !>@}
   !> \addtogroup OPENCMISS_EulerDAESolverTypes OPENCMISS::Solver::EulerDAESolverTypes
   !> \brief The Euler solver types for a differential-algebriac equation solver.
@@ -6875,7 +6888,7 @@ MODULE OpenCMISS_Iron
   PUBLIC CMFE_SOLVER_DAE_DIFFERENTIAL_ONLY,CMFE_SOLVER_DAE_INDEX_1,CMFE_SOLVER_DAE_INDEX_2,CMFE_SOLVER_DAE_INDEX_3
 
   PUBLIC CMFE_SOLVER_DAE_EULER,CMFE_SOLVER_DAE_CRANK_NICOLSON,CMFE_SOLVER_DAE_RUNGE_KUTTA,CMFE_SOLVER_DAE_ADAMS_MOULTON, &
-    & CMFE_SOLVER_DAE_BDF, &
+    & CMFE_SOLVER_DAE_BDF, CMFE_SOLVER_DAE_GL, &
     & CMFE_SOLVER_DAE_RUSH_LARSON,CMFE_SOLVER_DAE_EXTERNAL
 
   PUBLIC CMFE_SOLVER_DAE_EULER_FORWARD,CMFE_SOLVER_DAE_EULER_BACKWARD,CMFE_SOLVER_DAE_EULER_IMPROVED
@@ -6892,11 +6905,12 @@ MODULE OpenCMISS_Iron
 
   PUBLIC cmfe_CellMLEquations_CellMLAdd
 
-  PUBLIC cmfe_Solver_DAEEulerSolverTypeGet,cmfe_Solver_DAEEulerSolverTypeSet
+  PUBLIC cmfe_Solver_DAEEulerSolverTypeGet,cmfe_Solver_DAEEulerSolverTypeSet, &
+   & cmfe_Solver_DAEEulerForwardSetNSteps,cmfe_Solver_DAEEulerImprovedSetNSteps
 
   PUBLIC cmfe_Solver_DAESolverTypeGet,cmfe_Solver_DAESolverTypeSet
 
-  PUBLIC cmfe_Solver_DAETimesSet,cmfe_Solver_DAETimeStepSet
+  PUBLIC cmfe_Solver_DAETimesSet,cmfe_Solver_DAETimeStepSet,cmfe_Solver_DAEbdfSetTolerance
 
   PUBLIC cmfe_Solver_DynamicDegreeGet,cmfe_Solver_DynamicDegreeSet
 
@@ -7050,6 +7064,8 @@ MODULE OpenCMISS_Iron
 
   PUBLIC cmfe_BioelectricsFiniteElasticity_UpdateGeometricField
   
+  PUBLIC cmfe_BioelectricFiniteElasticity_GetLocalElementNumber
+  
 !!==================================================================================================================================
 !!
 !! FieldML routines
@@ -7198,16 +7214,21 @@ CONTAINS
   !================================================================================================================================
   !
 
-  SUBROUTINE cmfe_CustomTimingGet(CustomTimingOdeSolver, CustomTimingParabolicSolver, CustomTimingFESolver, Err)
+  SUBROUTINE cmfe_CustomTimingGet(CustomTimingOdeSolver, CustomTimingParabolicSolver, CustomTimingFESolver, &
+    & CustomTimingFileOutputUser, CustomTimingFileOutputSystem, Err)
 
     REAL(DP), INTENT(OUT) :: CustomTimingOdeSolver
     REAL(DP), INTENT(OUT) :: CustomTimingParabolicSolver
     REAL(DP), INTENT(OUT) :: CustomTimingFESolver
+    REAL(DP), INTENT(OUT) :: CustomTimingFileOutputUser
+    REAL(DP), INTENT(OUT) :: CustomTimingFileOutputSystem
     INTEGER(INTG), INTENT(OUT) :: err !<The error code.
 
     CustomTimingOdeSolver = TIMING_ODE_SOLVER
     CustomTimingParabolicSolver = TIMING_PARABOLIC_SOLVER
     CustomTimingFESolver = TIMING_FE_SOLVER
+    CustomTimingFileOutputUser = TIMING_FILE_OUTPUT_USER + TIMING_FILE_OUTPUT2
+    CustomTimingFileOutputSystem = TIMING_FILE_OUTPUT_SYSTEM + TIMING_FILE_OUTPUT2
 
     RETURN
 999 CALL cmfe_HandleError(err,error)
@@ -7224,6 +7245,9 @@ CONTAINS
     TIMING_ODE_SOLVER = 0_DP
     TIMING_PARABOLIC_SOLVER = 0_DP
     TIMING_FE_SOLVER = 0_DP
+    TIMING_FILE_OUTPUT2 = 0_DP
+    TIMING_FILE_OUTPUT_USER = 0_DP
+    TIMING_FILE_OUTPUT_SYSTEM = 0_DP
 
     RETURN
 999 CALL cmfe_HandleError(err,error)
@@ -14664,7 +14688,34 @@ CONTAINS
   !
   !================================================================================================================================
   !
+  
+  ! sets the MAXIMUM_NUMBER_OF_INTERMEDIATE of a CellML object :: only for debugging issues
+  SUBROUTINE cmfe_CellML_IntermediateMaxNumberSet(CellML,number,err)
+    !DLLEXPORT(cmfe_CellML_ModelImportObjVS)
 
+    !Argument variables
+    TYPE(cmfe_CellMLType), INTENT(INOUT) :: CellML ! The CellML environment to be operated on
+    INTEGER(INTG), INTENT(IN) :: number ! the number that MAXIMUM_NUMBER_OF_INTERMEDIATES shall be set to.
+    INTEGER(INTG), INTENT(OUT) :: err ! The error code.  
+    !Local variables
+    TYPE(VARYING_STRING) :: localError
+    
+    ENTERS("cmfe_CellML_IntermediateMaxNumberSet",err,error,*999)
+    
+    CALL CELLML_INTERMEDIATE_MAX_NUMBER_SET(CellML%CELLML,number,err,error,*999)
+    
+    EXITS("cmfe_CellML_IntermediateMaxNumberSet")
+    RETURN
+999 ERRORSEXITS("cmfe_CellML_IntermediateMaxNumberSet",err,error)
+    CALL cmfe_HandleError(err,error)
+    RETURN
+    
+  END SUBROUTINE cmfe_CellML_IntermediateMaxNumberSet
+
+  !
+  !================================================================================================================================
+  !  
+  
   !>Finishes the creation of CellML models field for a CellML environment identified by a user number.
   SUBROUTINE cmfe_CellML_ModelsFieldCreateFinishNumber(regionUserNumber,CellMLUserNumber,err)
     !DLLEXPORT(cmfe_CellML_ModelsFieldCreateFinishNumber)
@@ -48263,13 +48314,13 @@ CONTAINS
 #endif
 
 #ifdef USE_CUSTOM_PROFILING
-    CALL CustomProfilingStart('1. problem solve')
+    CALL CustomProfilingStart('level 0: problem solve')
 #endif
 
     CALL PROBLEM_SOLVE(problem%problem,err,error,*999)
 
 #ifdef USE_CUSTOM_PROFILING
-    CALL CustomProfilingStop('1. problem solve')
+    CALL CustomProfilingStop('level 0: problem solve')
 #endif
 
 #ifdef TAUPROF
@@ -50246,7 +50297,77 @@ CONTAINS
   !
   !================================================================================================================================
   !
+  
+  !>Sets the number of time sets for the forward Euler differential-algebraic equation solver.
+  SUBROUTINE cmfe_Solver_DAEEulerForwardSetNSteps(solver,number_timesteps,err)
 
+    !Argument variables
+    TYPE(cmfe_SolverType), INTENT(IN) :: solver !<The solver to set the number of time steps for.
+    INTEGER(INTG) :: number_timesteps !<The number it is to be set to.
+    INTEGER(INTG), INTENT(OUT) :: err !<The error code.
+    !Local variables
+    TYPE(VARYING_STRING) :: localError
+
+    ENTERS("cmfe_Solver_DAEEulerForwardSetNSteps",err,error,*999)
+    
+    IF(ASSOCIATED(solver%solver)) THEN
+      IF(ASSOCIATED(solver%solver%DAE_SOLVER)) THEN
+        CALL SOLVER_DAE_EULER_FORWARD_SET_NSTEPS(solver%solver%DAE_SOLVER,number_timesteps,err,error,*999)
+      ELSE
+        localError="The DAE solver is not associated."
+        CALL FlagError(localError,err,error,*999)
+      END IF    
+    ELSE
+      localError="The solver is not associated."
+      CALL FlagError(localError,err,error,*999)
+    END IF
+
+    EXITS("cmfe_Solver_DAEEulerForwardSetNSteps")
+    RETURN
+999 ERRORSEXITS("cmfe_Solver_DAEEulerForwardSetNSteps",err,error)
+    CALL cmfe_HandleError(err,error)
+    RETURN
+  END SUBROUTINE cmfe_Solver_DAEEulerForwardSetNSteps
+
+  !
+  !================================================================================================================================
+  !
+  
+  !>Sets the number of time sets for the improved Euler differential-algebraic equation solver.
+  SUBROUTINE cmfe_Solver_DAEEulerImprovedSetNSteps(solver,number_timesteps,err)
+
+    !Argument variables
+    TYPE(cmfe_SolverType), INTENT(IN) :: solver !<The solver to set the number of time steps for.
+    INTEGER(INTG) :: number_timesteps !<The number it is to be set to.
+    INTEGER(INTG), INTENT(OUT) :: err !<The error code.
+    !Local variables
+    TYPE(VARYING_STRING) :: localError
+
+    ENTERS("cmfe_Solver_DAEEulerImprovedSetNSteps",err,error,*999)
+    
+    IF(ASSOCIATED(solver%solver)) THEN
+      IF(ASSOCIATED(solver%solver%DAE_SOLVER)) THEN
+        CALL SOLVER_DAE_EULER_IMPROVED_SET_NSTEPS(solver%solver%DAE_SOLVER,number_timesteps,err,error,*999)
+      ELSE
+        localError="The DAE solver is not associated."
+        CALL FlagError(localError,err,error,*999)
+      END IF    
+    ELSE
+      localError="The solver is not associated."
+      CALL FlagError(localError,err,error,*999)
+    END IF
+
+    EXITS("cmfe_Solver_DAEEulerImprovedSetNSteps")
+    RETURN
+999 ERRORSEXITS("cmfe_Solver_DAEEulerImprovedSetNSteps",err,error)
+    CALL cmfe_HandleError(err,error)
+    RETURN
+  END SUBROUTINE cmfe_Solver_DAEEulerImprovedSetNSteps
+
+  !
+  !================================================================================================================================
+  !
+  
   !>Sets/changes the solve type for an Euler differential-algebraic equation solver identified by an user number.
   SUBROUTINE cmfe_Solver_DAEEulerSolverTypeSetNumber1(problemUserNumber,controlLoopIdentifiers,solverIndex,DAEEulerSolverType,err)
     !DLLEXPORT(cmfe_Solver_DAEEulerSolverTypeSetNumber1)
@@ -50744,6 +50865,44 @@ CONTAINS
     RETURN
 
   END SUBROUTINE cmfe_Solver_DAETimeStepSetObj
+
+  !
+  !================================================================================================================================
+  !
+
+  !>Changes the absolute and relative error tolerances for the BDF differential-algebraic equation solver.
+  SUBROUTINE cmfe_Solver_DAEbdfSetTolerance(solver,abs_tol,rel_tol,err)
+    !DLLEXPORT(cmfe_Solver_DAESolverTypeSetNumber1)
+
+    !Argument variables
+    TYPE(cmfe_SolverType), INTENT(IN) :: solver !<The solver to set the DAE error tolerance for.
+    REAL(DP), INTENT(IN) :: abs_tol !<The absolute error tolerance to be set.
+    REAL(DP), INTENT(IN) :: rel_tol !<The relative error tolerance to be set.
+    INTEGER(INTG), INTENT(OUT) :: err !<The error code.
+    !Local variables
+    TYPE(VARYING_STRING) :: localError
+
+    ENTERS("cmfe_Solver_DAEbdfSetTolerance",err,error,*999)
+    
+    IF(ASSOCIATED(solver%solver)) THEN
+      IF(ASSOCIATED(solver%solver%DAE_SOLVER)) THEN
+        CALL SOLVER_DAE_BDF_SET_TOLERANCE(solver%solver%DAE_SOLVER,abs_tol,rel_tol,err,error,*999)
+      ELSE
+        localError="The DAE solver is not associated."
+        CALL FlagError(localError,err,error,*999)
+      END IF    
+    ELSE
+      localError="The solver is not associated."
+      CALL FlagError(localError,err,error,*999)
+    END IF
+
+    EXITS("cmfe_Solver_DAEbdfSetTolerance")
+    RETURN
+999 ERRORSEXITS("cmfe_Solver_DAEbdfSetTolerance",err,error)
+    CALL cmfe_HandleError(err,error)
+    RETURN
+
+  END SUBROUTINE cmfe_Solver_DAEbdfSetTolerance
 
   !
   !================================================================================================================================
@@ -61808,6 +61967,229 @@ CONTAINS
   !================================================================================================================================
   !
 
+  SUBROUTINE cmfe_OutputInterpolationParameters(Problem, DependentFieldM, SolverParabolic, Err)
+    TYPE(cmfe_ProblemType), INTENT(IN) :: Problem
+    TYPE(cmfe_FieldType), INTENT(IN) :: DependentFieldM
+    TYPE(cmfe_SolverType) :: SolverParabolic
+    INTEGER(INTG), INTENT(OUT) :: Err !<The error code.
+    
+    !Local variables
+    TYPE(FIELD_TYPE), POINTER :: DEPENDENT_FIELD
+    TYPE(DOMAIN_MAPPING_TYPE), POINTER :: ELEMENTS_MAPPING
+    TYPE(EQUATIONS_TYPE), POINTER :: EQUATIONS
+    INTEGER(INTG) :: element_idx, ne, component_idx, equations_set_idx
+    TYPE(FIELD_INTERPOLATION_PARAMETERS_TYPE), POINTER :: INTERPOLATION_PARAMETERS
+    TYPE(SOLVER_TYPE), POINTER :: SOLVER
+    TYPE(SOLVER_EQUATIONS_TYPE), POINTER :: SOLVER_EQUATIONS
+    TYPE(SOLVER_MAPPING_TYPE), POINTER :: SOLVER_MAPPING
+    TYPE(EQUATIONS_SET_TYPE), POINTER :: EQUATIONS_SET
+    INTEGER(INTG) :: ComputationalNodeNumber
+    
+    ENTERS("cmfe_OutputInterpolationParameters", err, error, *999 )
+
+    !NULLIFY(INTERPOLATION_PARAMETERS)
+    !ALLOCATE(INTERPOLATION_PARAMETERS)
+    
+    CALL cmfe_ComputationalNodeNumberGet(ComputationalNodeNumber, Err)
+    
+    SOLVER=>SolverParabolic%Solver
+    
+    !CALL cmfe_PrintProblem(Problem, 1, 5, Err)
+    !CALL cmfe_PrintField(DependentFieldM, 1, 5, Err)
+    IF(ASSOCIATED(SOLVER)) THEN
+      IF(SOLVER%SOLVER_FINISHED) THEN
+        SOLVER_EQUATIONS=>SOLVER%SOLVER_EQUATIONS
+        IF(ASSOCIATED(SOLVER_EQUATIONS)) THEN
+          SOLVER_MAPPING=>SOLVER_EQUATIONS%SOLVER_MAPPING
+        ENDIF
+      ENDIF
+    ENDIF
+          
+    PRINT*, "Output interpolation parameters (opencmiss_iron.f90:61815), process ", ComputationalNodeNumber
+          
+    DO equations_set_idx=1,SOLVER_MAPPING%NUMBER_OF_EQUATIONS_SETS
+      EQUATIONS_SET=>SOLVER_MAPPING%EQUATIONS_SETS(equations_set_idx)%PTR
+      PRINT*, "equation_set ",equations_set_idx,"of",SOLVER_MAPPING%NUMBER_OF_EQUATIONS_SETS
+      
+  !    
+  !    IF(ASSOCIATED(EQUATIONS_SET)) THEN
+  !      DEPENDENT_FIELD=>EQUATIONS_SET%DEPENDENT%DEPENDENT_FIELD
+      DEPENDENT_FIELD=>DependentFieldM%Field
+      
+      EQUATIONS=>EQUATIONS_SET%EQUATIONS
+
+     IF(ASSOCIATED(DEPENDENT_FIELD)) THEN
+        
+        ELEMENTS_MAPPING=>DEPENDENT_FIELD%DECOMPOSITION%DOMAIN( &
+          & DEPENDENT_FIELD%DECOMPOSITION%MESH_COMPONENT_NUMBER)%PTR% &
+          & MAPPINGS%ELEMENTS
+          
+        PRINT*, "------- internal elements ------------------------"
+        PRINT*, "      index  local elno   interpolation_parameters"
+        
+        DO element_idx=ELEMENTS_MAPPING%INTERNAL_START, ELEMENTS_MAPPING%INTERNAL_FINISH
+        
+          ne = ELEMENTS_MAPPING%DOMAIN_LIST(element_idx)
+          
+          ! get interpolation parameters of element
+          ! version which is used with real preallocated variable names:
+          !CALL FIELD_INTERPOLATION_PARAMETERS_ELEMENT_GET(FIELD_VALUES_SET_TYPE,ne,&
+          !  & EQUATIONS%INTERPOLATION%GEOMETRIC_INTERP_PARAMETERS(FIELD_U_VARIABLE_TYPE)%PTR,ERR,ERROR,*999)
+
+          INTERPOLATION_PARAMETERS=> &
+            & EQUATIONS%INTERPOLATION%GEOMETRIC_INTERP_POINT(FIELD_U_VARIABLE_TYPE)%PTR%INTERPOLATION_PARAMETERS                
+          
+          ! direct version
+          CALL FIELD_INTERPOLATION_PARAMETERS_ELEMENT_GET(FIELD_VALUES_SET_TYPE,ne,INTERPOLATION_PARAMETERS,ERR,ERROR,*999)
+          
+          DO component_idx = 1,INTERPOLATION_PARAMETERS%FIELD_VARIABLE%NUMBER_OF_COMPONENTS
+            PRINT*, element_idx, ne, INTERPOLATION_PARAMETERS%PARAMETERS(:,component_idx)
+          ENDDO
+        ENDDO
+        
+        PRINT*, "------- boundary elements ------------------------"
+        PRINT*, "      index  local elno   interpolation_parameters"
+        DO element_idx=ELEMENTS_MAPPING%BOUNDARY_START, ELEMENTS_MAPPING%BOUNDARY_FINISH
+        
+          ne = ELEMENTS_MAPPING%DOMAIN_LIST(element_idx)
+          
+          ! get interpolation parameters of element
+          ! version which is used with real preallocated variable names:
+          !CALL FIELD_INTERPOLATION_PARAMETERS_ELEMENT_GET(FIELD_VALUES_SET_TYPE,ne,&
+          !  & EQUATIONS%INTERPOLATION%GEOMETRIC_INTERP_PARAMETERS(FIELD_U_VARIABLE_TYPE)%PTR,ERR,ERROR,*999)
+
+          INTERPOLATION_PARAMETERS=> &
+            & EQUATIONS%INTERPOLATION%GEOMETRIC_INTERP_POINT(FIELD_U_VARIABLE_TYPE)%PTR%INTERPOLATION_PARAMETERS                
+          
+          ! direct version
+          CALL FIELD_INTERPOLATION_PARAMETERS_ELEMENT_GET(FIELD_VALUES_SET_TYPE,ne,INTERPOLATION_PARAMETERS,ERR,ERROR,*999)
+          
+          DO component_idx = 1,INTERPOLATION_PARAMETERS%FIELD_VARIABLE%NUMBER_OF_COMPONENTS
+            PRINT*, element_idx, ne, INTERPOLATION_PARAMETERS%PARAMETERS(:,component_idx)
+          ENDDO
+        ENDDO
+      ENDIF
+    ENDDO
+    
+    EXITS("cmfe_OutputInterpolationParameters")
+    RETURN
+999 ERRORSEXITS("cmfe_OutputInterpolationParameters",err,error)
+    CALL cmfe_HandleError( err, error )
+    RETURN
+    
+  END SUBROUTINE cmfe_OutputInterpolationParameters
+  
+  !
+  !================================================================================================================================
+  !
+
+  FUNCTION cmfe_getFieldSize(Field, Err)
+    TYPE(cmfe_FieldType), INTENT(IN) :: Field
+    INTEGER(INTG), INTENT(OUT) :: Err !<The error code.
+    INTEGER(INTG) :: NumberOfBytes, cmfe_getFieldSize
+    INTEGER(INTG) :: idx
+    
+    NumberOfBytes = SIZEOF(Field%Field)
+    DO idx=1,SIZE(Field%Field%Variables)
+      NumberOfBytes = NumberOfBytes + SIZEOF(Field%Field%VARIABLES(idx))
+    ENDDO
+    DO idx=1,SIZE(Field%Field%Variable_Type_Map)
+      NumberOfBytes = NumberOfBytes + SIZEOF(Field%Field%Variable_Type_Map(idx))
+    ENDDO
+    cmfe_getFieldSize = NumberOfBytes
+  
+  END FUNCTION cmfe_getFieldSize
+  
+  SUBROUTINE cmfe_BioelectricFiniteElasticity_GetLocalElementNumber(GeometricField, ElementGlobalNumber, ElementLocalNumber, Err)
+    TYPE(cmfe_FieldType), INTENT(IN) :: GeometricField  !< the geometric field of the elements
+    INTEGER(INTG), INTENT(IN) :: ElementGlobalNumber !< the global element number of the element for which the local number is seeked
+    INTEGER(INTG), INTENT(OUT) :: ElementLocalNumber !< the local number of the element with the global number (or 0 if the element is not on the local domain)
+    INTEGER(INTG), INTENT(OUT) :: Err !<The error code.
+    
+    ENTERS("cmfe_GetLocalElementNumber", err, error, *999)
+
+    CALL BioelectricFiniteElasticity_GetLocalElementNumber(GeometricField%Field, ElementGlobalNumber, ElementLocalNumber, Err, &
+     & Error, *999)
+    
+    EXITS("cmfe_GetLocalElementNumber")
+    RETURN
+999 ERRORSEXITS("cmfe_GetLocalElementNumber",err,error)
+    CALL cmfe_HandleError( err, error )
+    RETURN
+    
+  END SUBROUTINE cmfe_BioelectricFiniteElasticity_GetLocalElementNumber
+    
+  
+  !
+  !================================================================================================================================
+  !
+
+  SUBROUTINE cmfe_PrintElementsMapping(Decomposition, Err)
+    TYPE(cmfe_DecompositionType), INTENT(IN) :: Decomposition
+    INTEGER(INTG), INTENT(OUT) :: Err !<The error code.
+    INTEGER(INTG) :: I, NumberOfComputationalNodes, ComputationalNodeNumber
+    
+    ! get computational node numbers
+    CALL cmfe_ComputationalNodeNumberGet(ComputationalNodeNumber, Err)
+    CALL cmfe_ComputationalNumberOfNodesGet(NumberOfComputationalNodes, Err)
+    
+    ! print ELement mappings
+    DO I = 0,NumberOfComputationalNodes-1
+      CALL MPI_BARRIER(MPI_COMM_WORLD, ERR)
+      IF (ComputationalNodeNumber == I) THEN
+        PRINT*, "Process ",I," of ",NumberOfComputationalNodes,": Element mapping for DecompositionM"
+        ! print variables
+        CALL Print_Domain_Mapping(Decomposition%DECOMPOSITION%DOMAIN( &
+          & Decomposition%DECOMPOSITION%MESH_COMPONENT_NUMBER)%PTR%MAPPINGS%ELEMENTS, 1, 1000)
+        CALL FLUSH()   ! flush stdout
+      ENDIF
+    ENDDO
+    CALL MPI_BARRIER(MPI_COMM_WORLD, ERR)
+    
+    END SUBROUTINE cmfe_PrintElementsMapping
+  
+  !
+  !================================================================================================================================
+  !
+
+  SUBROUTINE cmfe_PrintNodesMapping(Decomposition, Err)
+    TYPE(cmfe_DecompositionType), INTENT(IN) :: Decomposition
+    INTEGER(INTG), INTENT(OUT) :: Err !<The error code.
+    INTEGER(INTG) :: I, NumberOfComputationalNodes, ComputationalNodeNumber
+    ! get computational node numbers
+    CALL cmfe_ComputationalNodeNumberGet(ComputationalNodeNumber, Err)
+    CALL cmfe_ComputationalNumberOfNodesGet(NumberOfComputationalNodes, Err)
+    
+    ! print ELement mappings
+    DO I = 0,NumberOfComputationalNodes-1
+      CALL MPI_BARRIER(MPI_COMM_WORLD, ERR)
+      IF (ComputationalNodeNumber == I) THEN
+        PRINT*, "Process ",I," of ",NumberOfComputationalNodes,": Node mapping for DecompositionM"
+        ! print variables
+        CALL Print_Domain_Mapping(Decomposition%DECOMPOSITION%DOMAIN( &
+          & Decomposition%DECOMPOSITION%MESH_COMPONENT_NUMBER)%PTR%MAPPINGS%NODES, 2, 1000)
+        CALL FLUSH()   ! flush stdout
+      ENDIF
+    ENDDO
+    CALL MPI_BARRIER(MPI_COMM_WORLD, ERR)
+    
+    END SUBROUTINE cmfe_PrintNodesMapping
+  
+  !
+  !================================================================================================================================
+  !
+
+  SUBROUTINE cmfe_PrintSolverEquationsM(SolverEquationsM, Err)
+    TYPE(cmfe_SolverEquationsType), INTENT(IN) :: SolverEquationsM
+    INTEGER(INTG), INTENT(OUT) :: Err !<The error code.
+    
+    CALL Print_Solver_Mapping(SolverEquationsM%solverEquations%SOLVER_MAPPING, 5, 10)
+  
+  END SUBROUTINE 
+  !
+  !================================================================================================================================
+  !
+
   SUBROUTINE cmfe_CustomProfilingStart(Identifier, Err)
     ! PARAMETERS
     CHARACTER(LEN=*), INTENT(IN)  :: Identifier !< A custom Identifier that describes the timer
@@ -61918,6 +62300,14 @@ CONTAINS
 #endif
   END SUBROUTINE cmfe_CustomProfilingGetEnabled
 
+  !
+  !================================================================================================================================
+  !
+  SUBROUTINE cmfe_CustomProfilingReset(Err)
+    INTEGER(INTG), INTENT(OUT) :: err !<The error code.
+    
+    CALL CustomProfilingReset()
+  END SUBROUTINE cmfe_CustomProfilingReset
 
 !!==================================================================================================================================
 !!
@@ -62277,5 +62667,833 @@ CONTAINS
     INTEGER(INTG), INTENT(OUT) :: Err !<The error code.
     CALL Print_HISTORY(Variable%history, MaxDepth, MaxArrayLength)
   END SUBROUTINE cmfe_PrintHistory
+
+
+  !
+  !================================================================================================================================
+  ! this subroutines checks whether or not a given Field with VariableType and NodeUserNumber has ComponentNumber and stores it in UserNodeExist
+  SUBROUTINE cmfe_DomainTopologyNodeCheckExists(Field, VariableType, NodeUserNumber, ComponentNumber, UserNodeExist, Err)
+
+    TYPE(cmfe_FieldType), INTENT(IN)    :: Field !<The field to set the boundary condition for.
+    INTEGER(INTG), INTENT(IN)           :: NodeUserNumber !<The user number of the node to set the boundary conditions for.
+    INTEGER(INTG), INTENT(IN)           :: ComponentNumber !<The component number of the field to set the boundary condition for.
+    INTEGER(INTG), INTENT(IN)           :: VariableType !<The variable type of the field to set the boundary condition for. \see OPENCMISS_FieldVariableTypes
+    INTEGER(INTG), INTENT(OUT)          :: Err
+    LOGICAL      , INTENT(OUT)          :: UserNodeExist !< result, whether or not the user node ID exists for the given field
+    ! LOCAL VARIABLES
+    LOGICAL                             :: GhostNode !< redundant parameter, only used for being able to make subroutine call
+    INTEGER(INTG)                       :: DomainLocalNodeNumber !< redundant parameter, only used for being able to make subroutine call
+    TYPE(DOMAIN_TOPOLOGY_TYPE), POINTER :: DOMAIN_TOPOLOGY !< redundant parameter, only used for being able to make subroutine call
+    TYPE(VARYING_STRING)                :: Error
+    INTEGER(INTG)                       :: NumberOfComponents
+    INTEGER(INTG), ALLOCATABLE          :: VariableTypes(:) !< variable to contain all variable types for a given field
+    LOGICAL                             :: VariableTypeFound
+
+    ENTERS("cmfe_DomainTopologyNodeCheckExists", Err, error, *999)
+
+    ! check if variable type is set for given field
+    ALLOCATE(VariableTypes(Field%Field%NUMBER_OF_VARIABLES),STAT=Err)
+    IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+    CALL cmfe_Field_VariableTypesGet(Field, VariableTypes, Err)
+    VariableTypeFound=ANY(VariableTypes==VariableType)
+    IF(.NOT.VariableTypeFound) CALL cmfe_HandleError(Err, error)
+    ! check if field has given component
+    CALL cmfe_Field_NumberOfComponentsGet(Field, VariableType, NumberOfComponents, Err)
+    IF(NumberOfComponents<ComponentNumber) CALL cmfe_HandleError(Err, error)
+    ! check if domain topology has given user node ID
+    DOMAIN_TOPOLOGY=>FIELD%FIELD%VARIABLE_TYPE_MAP(variableType)%PTR%COMPONENTS(componentNumber)%DOMAIN%TOPOLOGY
+    IF(.NOT.ASSOCIATED(DOMAIN_TOPOLOGY)) CALL cmfe_HandleError(err,error)
+    ! NOTE: we are misusing this function call so we need to handle the return error code
+    CALL DOMAIN_TOPOLOGY_NODE_CHECK_EXISTS(DOMAIN_TOPOLOGY, nodeUserNumber, UserNodeExist, &
+      & DomainLocalNodeNumber, GhostNode, Err, Error, *999)
+
+    DEALLOCATE(VariableTypes)
+    EXITS("cmfe_DomainTopologyNodeCheckExists")
+
+    RETURN
+999 err = 0
+    ERRORSEXITS("cmfe_DomainTopologyNodeCheckExists",err,error)
+    CALL cmfe_HandleError(err,error)
+    RETURN
+ 
+  END SUBROUTINE cmfe_DomainTopologyNodeCheckExists
   
+  !
+  !================================================================================================================================
+  !
+  ! This routine reads input mesh files in CHeart X/T/B format and stores mesh info to make sure the user is able to allocate variables
+  ! Note: this routine makes use of the Fortran 2008 feature to obtain a file unit that is free
+  ! Note: assumes that the mesh contains only one mesh type
+  SUBROUTINE cmfe_ReadMeshInfo(Filename, NumberOfDimensions, NumberOfNodes, NumberOfElements, &
+    & NumberOfNodesPerElement, NumberOfBoundaryPatches, NumberOfBoundaryPatchComponents, Method, Err)
+    ! IN / OUT variables
+    CHARACTER(LEN=*),   INTENT(IN)                  :: Filename                         !< The file name to import the mesh data from
+    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfDimensions               !< The number of components of the mesh coordinates
+    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfNodes                    !< The number of nodes in the mesh
+    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfElements                 !< The number of elements in the mesh
+    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfNodesPerElement          !< The number of nodes per element in the mesh
+    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfBoundaryPatches          !< The number of boundary patches for the mesh
+    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfBoundaryPatchComponents  !< The number of boundary patch components for the mesh
+    CHARACTER(LEN=*),   INTENT(IN)                  :: Method                           !< The import method to use, e.g, CHeart, Cmgui, etc.
+    INTEGER(INTG),      INTENT(OUT)                 :: Err                              !< The error code.
+    ! Local variables
+    TYPE(VARYING_STRING)                            :: VFileName,VMethod
+    INTEGER(INTG)                                   :: FilenameLength,MethodLength
+    INTEGER(INTG)                                   :: NodeFileUnit,ElementFileUnit,BoundaryFileUnit
+    INTEGER(INTG)                                   :: NodeHeader(2),ElementHeader(2),BoundaryHeader
+    INTEGER(INTG)                                   :: NumberOfNodesT,NumberOfNodesB
+    INTEGER(INTG)                                   :: FirstLineOfElementFile(27)
+    CHARACTER(LEN=256)                              :: Line
+    INTEGER(INTG)                                   :: CharacterIdx,CurrentIdx,PreviousIdx,FirstIdx,IntValue
+
+    ENTERS("cmfe_ReadMeshInfo", Err, Error, *999)
+
+    ! Initialize variables
+    NumberOfDimensions      = 0_INTG
+    NodeHeader              = 0_INTG
+    ElementHeader           = 0_INTG
+    BoundaryHeader          = 0_INTG
+    NumberOfNodes           = 0_INTG
+    NumberOfElements        = 0_INTG
+    NumberOfBoundaryPatches = 0_INTG
+    NumberOfNodesPerElement = 0_INTG
+    NumberOfNodesT          = 0_INTG
+
+    ! Get file name and method name
+    FilenameLength  = LEN_TRIM(Filename)
+    VFilename       = Filename(1:FilenameLength)
+    MethodLength    = LEN_TRIM(Method)
+    VMethod         = Method(1:MethodLength)
+
+    ! Reading the X/T/B files from CHeart file format
+    IF(VMethod=="CHeart") THEN
+      ! Get available file units (Fortran 2008 feature)
+      OPEN(NEWUNIT=NodeFileUnit,     FILE=CHAR(VFilename)//".X", ACTION="read")
+      OPEN(NEWUNIT=ElementFileUnit,  FILE=CHAR(VFilename)//".T", ACTION="read")
+      OPEN(NEWUNIT=BoundaryFileUnit, FILE=CHAR(VFilename)//".B", ACTION="read")
+      
+      ! Get some mesh information
+      READ(NodeFileUnit, *)     NodeHeader
+      READ(ElementFileUnit, *)  ElementHeader
+      READ(BoundaryFileUnit, *) BoundaryHeader
+      NumberOfNodes             = NodeHeader(1)
+      NumberOfDimensions        = NodeHeader(2)
+      NumberOfElements          = ElementHeader(1)
+      NumberOfNodesT            = ElementHeader(2)
+      NumberOfBoundaryPatches   = BoundaryHeader
+
+      ! Do some sanity checks before reading mesh data
+      IF(.NOT.(NumberOfNodes==NumberOfNodesT))  CALL FlagError("X and T files have different number of nodes.", Err, Error, *999)
+      IF(NumberOfNodes<0_INTG)                  CALL FlagError("Invalid number of nodes.", Err, Error, *999)
+      IF(NumberOfDimensions<0_INTG)             CALL FlagError("Invalid number of dimensions.", Err, Error, *999)
+      IF(NumberOfElements<0_INTG)               CALL FlagError("Invalid number of elements.", Err, Error, *999)
+      IF(NumberOfBoundaryPatches<0_INTG)        CALL FlagError("Invalid number of boundary patches.", Err, Error, *999)
+
+      ! To get the number of nodes per element, we have to do a little trick:
+      ! We read the first non-header line of the element file and read each integer value
+      READ(ElementFileUnit,'(A)') Line
+      PreviousIdx   = 1
+      FirstIdx      = 1
+      DO CharacterIdx=1,LEN(Line)
+        CurrentIdx = INDEX('0123456789', Line(CharacterIdx:CharacterIdx))
+        IF((CurrentIdx==0_INTG).AND.(PreviousIdx>0_INTG)) THEN
+          READ(Line(FirstIdx:CharacterIdx-1), *) IntValue
+          NumberOfNodesPerElement                           = NumberOfNodesPerElement + 1_INTG
+          FirstLineOfElementFile(NumberOfNodesPerElement)   = IntValue
+        ELSE IF((CurrentIdx>0_INTG).AND.(PreviousIdx==0_INTG)) THEN
+          FirstIdx = CharacterIdx
+        END IF
+        PreviousIdx = CurrentIdx
+      END DO
+
+      ! Figure out how many components the boundary file has
+      SELECT CASE(NumberOfDimensions)
+      CASE(2)
+        SELECT CASE(NumberOfNodesPerElement)
+        CASE(3)
+          ! Linear triangle
+          NumberOfBoundaryPatchComponents = 4_INTG
+        CASE(4)
+          ! Linear quadrilateral
+          NumberOfBoundaryPatchComponents = 4_INTG
+        CASE(6)
+          ! Quadratic triangle
+          NumberOfBoundaryPatchComponents = 5_INTG
+        CASE(9)
+          ! Quadratic quadrilateral
+          NumberOfBoundaryPatchComponents = 5_INTG
+        CASE DEFAULT
+          CALL FlagError("Unknown 2D mesh type for method: "//TRIM(Method), Err, Error, *999)
+        END SELECT
+      CASE(3)
+        SELECT CASE(NumberOfNodesPerElement)
+        CASE(4)
+          ! Linear tetrahedron
+          NumberOfBoundaryPatchComponents = 5_INTG
+        CASE(8)
+          ! Linear hexahedron
+          NumberOfBoundaryPatchComponents = 6_INTG
+        CASE(10)
+          ! Quadratic tetrahedron
+          NumberOfBoundaryPatchComponents = 8_INTG
+        CASE(27)
+          ! Quadratic hexahedron
+          NumberOfBoundaryPatchComponents = 11_INTG
+        CASE DEFAULT
+          CALL FlagError("Unknown 3D mesh type for method: "//TRIM(Method), Err, Error, *999)
+        END SELECT
+      CASE DEFAULT
+        CALL FlagError("1D mesh import not supported for method: "//TRIM(Method), Err, Error, *999)
+      END SELECT
+
+      ! Close files
+      CLOSE(NodeFileUnit)
+      CLOSE(ElementFileUnit)
+      CLOSE(BoundaryFileUnit)
+    ELSE
+      CALL FlagError("Invalid mesh import type. Valid types are: CHeart", Err, Error, *999)
+    END IF
+
+    EXITS("cmfe_ReadMeshInfo")
+
+    RETURN
+999 ERRORSEXITS("cmfe_ReadMeshInfo", Err, Error)
+    CALL cmfe_HandleError(Err, Error)
+    RETURN
+
+  END SUBROUTINE cmfe_ReadMeshInfo
+  
+  !
+  !================================================================================================================================
+  !
+  ! This routine reads input mesh files in CHeart X/T/B format and stores them in arrays
+  ! Note: this routine makes use of the Fortran 2008 feature to obtain a file unit that is free
+  ! Note: Need to call cmfe_ReadMeshInfo beforehand, where sanity checks have been done
+  SUBROUTINE cmfe_ReadMeshFiles(Filename, Nodes, Elements, BoundaryPatches, Method, Err)
+    ! IN / OUT variables
+    CHARACTER(LEN=*),   INTENT(IN)  :: Filename             !< The file name to import the mesh data from
+    REAL(DP),           INTENT(OUT) :: Nodes(:,:)           !< The coordinates of the mesh nodes
+    INTEGER(INTG),      INTENT(OUT) :: Elements(:,:)        !< The node IDs for each element
+    INTEGER(INTG),      INTENT(OUT) :: BoundaryPatches(:)   !< The boundary patch labels for all boundary nodes
+    CHARACTER(LEN=*),   INTENT(IN)  :: Method               !<The export method to use, e.g, CHeart, Cmgui, etc.
+    INTEGER(INTG),      INTENT(OUT) :: Err                  !<The error code.
+    ! Local variables
+    TYPE(VARYING_STRING)            :: VFileName,VMethod
+    INTEGER(INTG)                   :: FilenameLength,MethodLength
+    INTEGER(INTG)                   :: NodeFileUnit,ElementFileUnit,BoundaryFileUnit
+    INTEGER(INTG)                   :: NumberOfNodes,NumberOfDimensions
+    INTEGER(INTG)                   :: NumberOfElements,NumberOfNodesPerElement
+    INTEGER(INTG)                   :: NumberOfBoundaryPatches,NumberOfBoundaryPatchComponents
+    INTEGER(INTG)                   :: IntValue,CurrentIdx,ComponentIdx,PatchIdx,CurrentPatchID,Offset,Idx
+    INTEGER(INTG), ALLOCATABLE      :: Permutation(:),IntValuesT(:),IntValuesB(:),BoundaryPatchesTemp(:,:)
+    INTEGER(INTG)                   :: NumberOfPatchIDs
+    INTEGER(INTG)                   :: PatchIDs(25),NumberOfNodesPerPatchID(25),CurrentFirstPatchIdx(25)
+
+    ENTERS("cmfe_ReadMeshFiles", Err, Error, *999)
+
+    ! Initialize variables
+    PatchIDs                = -1_INTG ! default, not present
+    NumberOfNodesPerPatchID =  0_INTG
+    NumberOfPatchIDs        =  0_INTG
+
+    ! Get file name and method name
+    FilenameLength  = LEN_TRIM(Filename)
+    VFilename       = Filename(1:FilenameLength)
+    MethodLength    = LEN_TRIM(Method)
+    VMethod         = Method(1:MethodLength)
+
+    ! Reading the X/T/B files from CHeart file format
+    IF(VMethod=="CHeart") THEN
+
+      ! Get mesh info
+      NumberOfNodes                   = SIZE(Nodes,1)
+      NumberOfDimensions              = SIZE(Nodes,2)
+      NumberOfElements                = SIZE(Elements,1)
+      NumberOfNodesPerElement         = SIZE(Elements,2)
+
+      ! Figure out which node IDs we have to swap
+      ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+      ALLOCATE(IntValuesT(NumberOfNodesPerElement),STAT=Err)
+      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+      SELECT CASE(NumberOfDimensions)
+      CASE(2)
+        SELECT CASE(NumberOfNodesPerElement)
+        CASE(3)
+          ! Linear triangle
+          Permutation       = 0
+          DO CurrentIdx=1,NumberOfNodesPerElement
+            Permutation(CurrentIdx) = CurrentIdx
+          END DO
+          NumberOfBoundaryPatchComponents = 4_INTG
+        CASE(4)
+          ! Linear quadrilateral
+          Permutation       = 0
+          DO CurrentIdx=1,NumberOfNodesPerElement
+            Permutation(CurrentIdx) = CurrentIdx
+          END DO
+          NumberOfBoundaryPatchComponents = 4_INTG
+        CASE(6)
+          ! Quadratic triangle
+          Permutation       = 0
+          Permutation(1)    = 1
+          Permutation(2)    = 2
+          Permutation(3)    = 3
+          Permutation(4)    = 4
+          Permutation(5)    = 6
+          Permutation(6)    = 5
+          NumberOfBoundaryPatchComponents = 5_INTG
+        CASE(9)
+          ! Quadratic quadrilateral
+          Permutation       = 0
+          Permutation(1)    = 1
+          Permutation(2)    = 5
+          Permutation(3)    = 2
+          Permutation(4)    = 6
+          Permutation(5)    = 7
+          Permutation(6)    = 8
+          Permutation(7)    = 3
+          Permutation(8)    = 9
+          Permutation(9)    = 4
+          NumberOfBoundaryPatchComponents = 5_INTG
+        CASE DEFAULT
+          CALL FlagError("Unknown 2D mesh type for method: "//TRIM(Method), Err, Error, *999)
+        END SELECT
+      CASE(3)
+        SELECT CASE(NumberOfNodesPerElement)
+        CASE(4)
+          ! Linear tetrahedron
+          Permutation       = 0
+          DO CurrentIdx=1,NumberOfNodesPerElement
+            Permutation(CurrentIdx) = CurrentIdx
+          END DO
+          NumberOfBoundaryPatchComponents = 5_INTG
+        CASE(8)
+          ! Linear hexahedron
+          Permutation       = 0
+          DO CurrentIdx=1,NumberOfNodesPerElement
+            Permutation(CurrentIdx) = CurrentIdx
+          END DO
+          NumberOfBoundaryPatchComponents = 6_INTG
+        CASE(10)
+          ! Quadratic tetrahedron
+          Permutation       =  0
+          Permutation(1)    =  1
+          Permutation(2)    =  5
+          Permutation(3)    =  2
+          Permutation(4)    =  6
+          Permutation(5)    =  7
+          Permutation(6)    =  3
+          Permutation(7)    =  8
+          Permutation(8)    =  9
+          Permutation(9)    = 10
+          Permutation(10)   =  4
+          NumberOfBoundaryPatchComponents = 8_INTG
+        CASE(27)
+          ! Quadratic hexahedron
+          Permutation       =  0
+          Permutation(1)    =  1
+          Permutation(2)    =  9
+          Permutation(3)    =  2
+          Permutation(4)    = 10
+          Permutation(5)    = 11
+          Permutation(6)    = 12
+          Permutation(7)    =  3
+          Permutation(8)    = 13
+          Permutation(9)    =  4
+          Permutation(10)   = 14
+          Permutation(11)   = 15
+          Permutation(12)   = 16
+          Permutation(13)   = 17
+          Permutation(14)   = 18
+          Permutation(15)   = 19
+          Permutation(16)   = 20
+          Permutation(17)   = 21
+          Permutation(18)   = 22
+          Permutation(19)   =  5
+          Permutation(20)   = 23
+          Permutation(21)   =  6
+          Permutation(22)   = 24
+          Permutation(23)   = 25
+          Permutation(24)   = 26
+          Permutation(25)   =  7
+          Permutation(26)   = 27
+          Permutation(27)   =  8
+          NumberOfBoundaryPatchComponents = 11_INTG
+        CASE DEFAULT
+          CALL FlagError("Unknown 3D mesh type for method: "//TRIM(Method), Err, Error, *999)
+        END SELECT
+      CASE DEFAULT
+        CALL FlagError("1D mesh import not supported for method: "//TRIM(Method), Err, Error, *999)
+      END SELECT
+      ALLOCATE(IntValuesB(NumberOfBoundaryPatchComponents),STAT=Err)
+      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+      
+      ! Get available file units (Fortran 2008 feature)
+      OPEN(NEWUNIT=NodeFileUnit,     FILE=CHAR(VFilename)//".X", ACTION="read")
+      OPEN(NEWUNIT=ElementFileUnit,  FILE=CHAR(VFilename)//".T", ACTION="read")
+      OPEN(NEWUNIT=BoundaryFileUnit, FILE=CHAR(VFilename)//".B", ACTION="read")
+
+      ! Skip header line and read all other lines in the element file
+      READ(ElementFileUnit,*) IntValue
+      DO CurrentIdx=1,NumberOfElements
+        READ(ElementFileUnit,*) IntValuesT(:)
+        DO Idx=1,NumberOfNodesPerElement
+          Elements(CurrentIdx,Idx)  = IntValuesT(Permutation(Idx))
+        END DO
+      END DO
+
+      ! Skip header line and read all other lines in the node file
+      READ(NodeFileUnit,*) IntValue
+      DO CurrentIdx=1,NumberOfNodes
+        READ(NodeFileUnit,*) Nodes(CurrentIdx,:)
+      END DO
+
+      ! Skip header line and read all other lines in the boundary file
+      READ(BoundaryFileUnit,*) NumberOfBoundaryPatches
+      ALLOCATE(BoundaryPatchesTemp(NumberOfBoundaryPatches,NumberOfBoundaryPatchComponents),STAT=Err)
+      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+      ! First of all, let's read all the boundary patches in a temporary variable and count the number of unique boundary patch IDs
+      DO CurrentIdx=1,NumberOfBoundaryPatches
+        READ(BoundaryFileUnit,*) BoundaryPatchesTemp(CurrentIdx,:)
+        DO PatchIdx=1,SIZE(PatchIDs,1)
+          ! Check whether it is an existing patch ID or if we found a new one
+          IF(PatchIDs(PatchIdx)==BoundaryPatchesTemp(CurrentIdx,NumberOfBoundaryPatchComponents)) THEN
+            NumberOfNodesPerPatchID(PatchIdx)   = NumberOfNodesPerPatchID(PatchIdx) + NumberOfBoundaryPatchComponents - 2_INTG
+            EXIT
+          ELSE IF(PatchIDs(PatchIdx)==-1_INTG) THEN
+            NumberOfPatchIDs                    = NumberOfPatchIDs + 1_INTG
+            PatchIDs(PatchIdx)                  = BoundaryPatchesTemp(CurrentIdx,NumberOfBoundaryPatchComponents)
+            NumberOfNodesPerPatchID(PatchIdx)   = NumberOfNodesPerPatchID(PatchIdx) + NumberOfBoundaryPatchComponents - 2_INTG
+            EXIT
+          ELSE
+            ! Do nothing
+          END IF
+        END DO
+      END DO
+      ! Set the number of patch IDs
+      BoundaryPatches(1)    = NumberOfPatchIDs
+      CurrentFirstPatchIdx  = 1_INTG+2*NumberOfPatchIDs+1_INTG
+      DO CurrentIdx=1,NumberOfPatchIDs
+        ! Get number of nodes for each patch ID
+        BoundaryPatches(1+CurrentIdx)                   = NumberOfNodesPerPatchID(CurrentIdx)
+        ! Get the current patch ID
+        BoundaryPatches(1+NumberOfPatchIDs+CurrentIdx)  = PatchIDs(CurrentIdx)
+        ! Define starting indices for boundary patches
+        IF(CurrentIdx>1) CurrentFirstPatchIdx(CurrentIdx) = CurrentFirstPatchIdx(CurrentIdx-1_INTG) + BoundaryPatches(CurrentIdx)
+      END DO
+      DO CurrentIdx=1,NumberOfBoundaryPatches
+        ! Get the current patch ID to match
+        CurrentPatchID=BoundaryPatchesTemp(CurrentIdx,NumberOfBoundaryPatchComponents)
+        DO PatchIdx=1,NumberOfPatchIDs
+          IF(CurrentPatchID==PatchIDs(PatchIdx)) THEN
+            Offset=CurrentFirstPatchIdx(PatchIdx)
+            EXIT
+          END IF
+        END DO
+        DO ComponentIdx=2,NumberOfBoundaryPatchComponents-1
+          BoundaryPatches(Offset+ComponentIdx-2)    = BoundaryPatchesTemp(CurrentIdx,ComponentIdx)
+        END DO
+       CurrentFirstPatchIdx(PatchIdx)=CurrentFirstPatchIdx(PatchIdx)+NumberOfBoundaryPatchComponents-2_INTG
+      END DO
+
+      ! Close files
+      CLOSE(NodeFileUnit)
+      CLOSE(ElementFileUnit)
+      CLOSE(BoundaryFileUnit)
+    ELSE
+      CALL FlagError("Invalid mesh import type. Valid types are: CHeart", Err, Error, *999)
+    END IF
+
+    ! Deallocate temporary variables
+    IF(ALLOCATED(Permutation))          DEALLOCATE(Permutation)
+    IF(ALLOCATED(IntValuesT))           DEALLOCATE(IntValuesT)
+    IF(ALLOCATED(IntValuesB))           DEALLOCATE(IntValuesB)
+    IF(ALLOCATED(BoundaryPatchesTemp))  DEALLOCATE(BoundaryPatchesTemp)
+
+    EXITS("cmfe_ReadMeshFiles")
+
+    RETURN
+999 ERRORSEXITS("cmfe_ReadMeshFiles", Err, Error)
+    CALL cmfe_HandleError(Err, Error)
+    RETURN
+
+  END SUBROUTINE cmfe_ReadMeshFiles
+
+  !
+  !================================================================================================================================
+  !
+
+  SUBROUTINE cmfe_ReadMeshFilesCubit(Filename, Nodes, Elements, Nodesets, InterpolationType, Method, Err)
+    ! IN / OUT variables
+    CHARACTER(LEN=*),            INTENT(IN)     :: Filename             !< The file name to import the mesh data from
+    INTEGER(INTG),  ALLOCATABLE, INTENT(OUT)    :: Elements(:,:)
+    REAL(DP)     ,  ALLOCATABLE, INTENT(OUT)    :: Nodes(:,:)
+    INTEGER(INTG),  ALLOCATABLE, INTENT(OUT)    :: Nodesets(:)
+    INTEGER(INTG),               INTENT(OUT)    :: InterpolationType
+    CHARACTER(LEN=*),            INTENT(IN)     :: Method               !<The export method to use, e.g., CHeart, OpenCMISS
+    INTEGER(INTG),               INTENT(OUT)    :: Err                  !<The error code.
+    ! Local variables
+    TYPE(VARYING_STRING)        :: VFileName,VMethod
+    TYPE(VARYING_STRING)        :: VElementType
+    CHARACTER(LEN=256)          :: ElementType
+    INTEGER(INTG)               :: FilenameLength,MethodLength,ElementTypeLength
+    INTEGER(INTG)               :: NodeFileUnit,ElementFileUnit,NodesetFileUnit
+    INTEGER(INTG)               :: NumberOfNodes,NumberOfNodesT
+    INTEGER(INTG)               :: NumberOfElements
+    INTEGER(INTG)               :: NumberOfDimensions
+    INTEGER(INTG)               :: NumberOfNodesPerElement
+    INTEGER(INTG)               :: NumberOfNodesets
+    INTEGER(INTG), ALLOCATABLE  :: LengthOfNodesets(:)
+    INTEGER(INTG), ALLOCATABLE  :: Permutation(:),IntValuesT(:)
+    INTEGER(INTG)               :: i, j, k, CurrentIdx
+
+    ENTERS("cmfe_ReadMeshFilesCubit", Err, Error, *999)
+
+    ! Initialize variables
+    NumberOfDimensions      = 0_INTG
+    NumberOfNodes           = 0_INTG
+    NumberOfNodesT          = 0_INTG
+    NumberOfElements        = 0_INTG
+    NumberOfNodesPerElement = 0_INTG
+    NumberOfNodesets        = 0_INTG
+
+    ! Get file name and method name
+    FilenameLength  = LEN_TRIM(Filename)
+    VFilename       = Filename(1:FilenameLength)
+    MethodLength    = LEN_TRIM(Method)
+    VMethod         = Method(1:MethodLength)
+
+    ! Reading the X/T/S files from CHeart file format
+    IF(VMethod=="CHeart") THEN
+      ! Get available file units (Fortran 2008 feature)
+      OPEN(NEWUNIT=NodeFileUnit,     FILE=CHAR(VFilename)//".X", ACTION="read")
+      OPEN(NEWUNIT=ElementFileUnit,  FILE=CHAR(VFilename)//".T", ACTION="read")
+      OPEN(NEWUNIT=NodesetFileUnit,  FILE=CHAR(VFilename)//".S", ACTION="read")
+
+      ! Reading the headers with mesh data
+      READ(NodeFileUnit, *)     NumberOfNodes, NumberOfDimensions
+      READ(ElementFileUnit, *)  NumberOfElements, NumberOfNodesT
+      READ(NodesetFileUnit, *)  ElementType
+
+      ! Get element name
+      ElementTypeLength  = LEN_TRIM(ElementType)
+      VElementType       = ElementType(1:ElementTypeLength)
+
+      ! Do some sanity checks before reading mesh data
+      IF(.NOT.(NumberOfNodes==NumberOfNodesT))  CALL FlagError("X and T files have different number of nodes.", Err, Error, *999)
+      IF(NumberOfNodes<0_INTG)                  CALL FlagError("Invalid number of nodes.", Err, Error, *999)
+      IF(NumberOfDimensions<0_INTG)             CALL FlagError("Invalid number of dimensions.", Err, Error, *999)
+      IF(NumberOfElements<0_INTG)               CALL FlagError("Invalid number of elements.", Err, Error, *999)
+      IF(.NOT.(VElementType=="TRI3"    .OR. &
+               VElementType=="TRI6"    .OR. &
+               VElementType=="QUAD4"   .OR. &
+               VElementType=="QUAD9"   .OR. &
+               VElementType=="TETRA4"  .OR. &
+               VElementType=="TETRA10" .OR. &
+               VElementType=="HEX8"    .OR. &
+               VElementType=="HEX27"))          CALL FlagError("Invalid element type.", Err, Error, *999)
+
+      ! Reading the nodes 
+      ALLOCATE(Nodes(NumberOfNodes,NumberOfDimensions),STAT=Err)
+      DO i = 1, NumberOfNodes
+        READ (NodeFileUnit,*) Nodes(i,:)
+      END DO 
+
+      ! Specifing number of nodes per element, interpolation type (linear/quadratic) and the permutation vector based on element type
+      IF (VElementType=="TRI3") THEN
+        NumberOfNodesPerElement = 3
+        InterpolationType = 1
+        ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+        IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+        Permutation       = 0
+        DO CurrentIdx=1,NumberOfNodesPerElement
+          Permutation(CurrentIdx) = CurrentIdx
+        END DO
+      ELSE IF (VElementType=="TRI6") THEN
+        NumberOfNodesPerElement = 6
+        InterpolationType = 2
+        ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+        IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+        Permutation       = 0
+        Permutation(1)    = 1
+        Permutation(2)    = 2
+        Permutation(3)    = 3
+        Permutation(4)    = 4
+        Permutation(5)    = 6
+        Permutation(6)    = 5
+      ELSE IF (VElementType=="QUAD4") THEN
+        NumberOfNodesPerElement = 4
+        InterpolationType = 1
+        ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+        IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+        Permutation       = 0
+        DO CurrentIdx=1,NumberOfNodesPerElement
+          Permutation(CurrentIdx) = CurrentIdx
+        END DO
+      ELSE IF (VElementType=="QUAD9") THEN
+        NumberOfNodesPerElement = 9
+        InterpolationType = 2
+        ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+        IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+        Permutation       = 0
+        Permutation(1)    = 1
+        Permutation(2)    = 5
+        Permutation(3)    = 2
+        Permutation(4)    = 6
+        Permutation(5)    = 7
+        Permutation(6)    = 8
+        Permutation(7)    = 3
+        Permutation(8)    = 9
+        Permutation(9)    = 4
+      ELSE IF (VElementType=="TETRA4") THEN
+        NumberOfNodesPerElement = 4
+        InterpolationType = 1
+        ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+        IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+        Permutation       = 0
+        DO CurrentIdx=1,NumberOfNodesPerElement
+          Permutation(CurrentIdx) = CurrentIdx
+        END DO
+      ELSE IF (VElementType=="TETRA10") THEN
+        NumberOfNodesPerElement = 10
+        InterpolationType = 2
+        ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+        IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+        Permutation       =  0
+        Permutation(1)    =  1
+        Permutation(2)    =  5
+        Permutation(3)    =  2
+        Permutation(4)    =  6
+        Permutation(5)    =  7
+        Permutation(6)    =  3
+        Permutation(7)    =  8
+        Permutation(8)    =  9
+        Permutation(9)    = 10
+        Permutation(10)   =  4
+      ELSE IF (VElementType=="HEX8") THEN
+        NumberOfNodesPerElement = 8
+        InterpolationType = 1
+        ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+        IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+        Permutation       = 0
+        DO CurrentIdx=1,NumberOfNodesPerElement
+          Permutation(CurrentIdx) = CurrentIdx
+        END DO
+      ELSE IF (VElementType=="HEX27") THEN
+        NumberOfNodesPerElement = 27 
+        InterpolationType = 2
+        ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
+        IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+        Permutation       =  0
+        Permutation(1)    =  1
+        Permutation(2)    =  9
+        Permutation(3)    =  2
+        Permutation(4)    = 10
+        Permutation(5)    = 11
+        Permutation(6)    = 12
+        Permutation(7)    =  3
+        Permutation(8)    = 13
+        Permutation(9)    =  4
+        Permutation(10)   = 14
+        Permutation(11)   = 15
+        Permutation(12)   = 16
+        Permutation(13)   = 17
+        Permutation(14)   = 18
+        Permutation(15)   = 19
+        Permutation(16)   = 20
+        Permutation(17)   = 21
+        Permutation(18)   = 22
+        Permutation(19)   =  5
+        Permutation(20)   = 23
+        Permutation(21)   =  6
+        Permutation(22)   = 24
+        Permutation(23)   = 25
+        Permutation(24)   = 26
+        Permutation(25)   =  7
+        Permutation(26)   = 27
+        Permutation(27)   =  8
+      END IF      
+
+      ALLOCATE(Elements(NumberOfElements,NumberOfNodesPerElement))
+      ALLOCATE(IntValuesT(NumberOfNodesPerElement),STAT=Err)
+      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+
+      DO i = 1, NumberOfElements
+        READ (ElementFileUnit,*)  IntValuesT(:)
+        DO j=1,NumberOfNodesPerElement
+          Elements(i,j)  = IntValuesT(Permutation(j))
+        END DO
+      END DO
+
+      ! Reading the nodesets
+      READ(NodesetFileUnit, *)  NumberOfNodesets
+      IF (NumberOfNodesets > 0) THEN
+        ALLOCATE(LengthOfNodesets(NumberOfNodesets))
+        READ (NodesetFileUnit,*) LengthOfNodesets(:)
+        ALLOCATE(Nodesets(1+2*NumberOfNodesets+SUM(LengthOfNodesets)))
+
+        Nodesets(1)                    = NumberOfNodesets
+        Nodesets(2:1+NumberOfNodesets) = LengthOfNodesets(:)
+        DO i = 1, NumberOfNodesets
+          Nodesets(1+NumberOfNodesets+i) = i
+        END DO
+        READ (NodesetFileUnit,*)  Nodesets(2+2*NumberOfNodesets:)
+      END IF
+
+      ! Close files
+      CLOSE(NodeFileUnit)
+      CLOSE(ElementFileUnit)
+      CLOSE(NodesetFileUnit)
+
+    ! Reading the NODE/ELEM/NSET files from OpenCMISS file format
+    ELSE IF(VMethod=="OpenCMISS") THEN
+      ! Get available file units (Fortran 2008 feature)
+      OPEN(NEWUNIT=NodeFileUnit,     FILE=CHAR(VFilename)//".NODE", ACTION="read")
+      OPEN(NEWUNIT=ElementFileUnit,  FILE=CHAR(VFilename)//".ELEM", ACTION="read")
+      OPEN(NEWUNIT=NodesetFileUnit,  FILE=CHAR(VFilename)//".NSET", ACTION="read")
+
+      ! Reading the headers with mesh data
+      READ(NodeFileUnit, *)     NumberOfNodes, NumberOfDimensions
+      READ(ElementFileUnit, *)  NumberOfElements, NumberOfNodesT
+      READ(NodesetFileUnit, *)  ElementType
+
+      ! Get element name
+      ElementTypeLength  = LEN_TRIM(ElementType)
+      VElementType       = ElementType(1:ElementTypeLength)
+
+      ! Do some sanity checks before reading mesh data
+      IF(.NOT.(NumberOfNodes==NumberOfNodesT))  CALL FlagError("X and T files have different number of nodes.", Err, Error, *999)
+      IF(NumberOfNodes<0_INTG)                  CALL FlagError("Invalid number of nodes.", Err, Error, *999)
+      IF(NumberOfDimensions<0_INTG)             CALL FlagError("Invalid number of dimensions.", Err, Error, *999)
+      IF(NumberOfElements<0_INTG)               CALL FlagError("Invalid number of elements.", Err, Error, *999)
+      IF(.NOT.(VElementType=="TRI3"    .OR. &
+               VElementType=="TRI6"    .OR. &
+               VElementType=="QUAD4"   .OR. &
+               VElementType=="QUAD9"   .OR. &
+               VElementType=="TETRA4"  .OR. &
+               VElementType=="TETRA10" .OR. &
+               VElementType=="HEX8"    .OR. &
+               VElementType=="HEX27"))          CALL FlagError("Invalid element type.", Err, Error, *999)
+
+      ! Reading the nodes 
+      ALLOCATE(Nodes(NumberOfNodes,NumberOfDimensions),STAT=Err)
+      DO i = 1, NumberOfNodes
+        READ (NodeFileUnit,*) Nodes(i,:)
+      END DO 
+
+      ! Specifing number of nodes per element and interpolation type (linear/quadratic) based on element type
+      IF (VElementType=="TRI3") THEN
+        NumberOfNodesPerElement = 3
+        InterpolationType = 1
+      ELSE IF (VElementType=="TRI6") THEN
+        NumberOfNodesPerElement = 6
+        InterpolationType = 2
+      ELSE IF (VElementType=="QUAD4") THEN
+        NumberOfNodesPerElement = 4
+        InterpolationType = 1
+      ELSE IF (VElementType=="QUAD9") THEN
+        NumberOfNodesPerElement = 9
+        InterpolationType = 2
+      ELSE IF (VElementType=="TETRA4") THEN
+        NumberOfNodesPerElement = 4
+        InterpolationType = 1
+      ELSE IF (VElementType=="TETRA10") THEN
+        NumberOfNodesPerElement = 10
+        InterpolationType = 2
+      ELSE IF (VElementType=="HEX8") THEN
+        NumberOfNodesPerElement = 8
+        InterpolationType = 1
+      ELSE IF (VElementType=="HEX27") THEN
+        NumberOfNodesPerElement = 27 
+        InterpolationType = 2 
+      END IF      
+
+      ALLOCATE(Elements(NumberOfElements,NumberOfNodesPerElement))
+      DO i = 1, NumberOfElements
+        READ (ElementFileUnit,*)  Elements(i,:)
+      END DO
+
+      ! Reading the nodesets
+      READ(NodesetFileUnit, *)  NumberOfNodesets
+      IF (NumberOfNodesets > 0) THEN
+        ALLOCATE(LengthOfNodesets(NumberOfNodesets))
+        READ (NodesetFileUnit,*) LengthOfNodesets(:)
+        ALLOCATE(Nodesets(1+2*NumberOfNodesets+SUM(LengthOfNodesets)))
+
+        Nodesets(1)                    = NumberOfNodesets
+        Nodesets(2:1+NumberOfNodesets) = LengthOfNodesets(:)
+        DO i = 1, NumberOfNodesets
+          Nodesets(1+NumberOfNodesets+i) = i
+        END DO
+        READ (NodesetFileUnit,*)  Nodesets(2+2*NumberOfNodesets:)
+      END IF
+
+      ! Close files
+      CLOSE(NodeFileUnit)
+      CLOSE(ElementFileUnit)
+      CLOSE(NodesetFileUnit)
+
+    ELSE
+      CALL FlagError("Invalid mesh import type. Valid types are: CHeart, OpenCMISS", Err, Error, *999)
+    END IF   
+
+    IF(ALLOCATED(Permutation))       DEALLOCATE(Permutation)
+    IF(ALLOCATED(IntValuesT))        DEALLOCATE(IntValuesT)
+    IF(ALLOCATED(LengthOfNodesets))  DEALLOCATE(LengthOfNodesets)
+
+    EXITS("cmfe_ReadMeshFilesCubit")
+
+    RETURN
+999 ERRORSEXITS("cmfe_ReadMeshFilesCubit", Err, Error)
+    CALL cmfe_HandleError(Err, Error)
+    RETURN
+
+  END SUBROUTINE cmfe_ReadMeshFilesCubit
+
+  !
+  !================================================================================================================================
+  !
+
+  !>Returns starting and stopping index of nodes belonging to a surface of given patch ID
+  SUBROUTINE cmfe_ImportedMesh_SurfaceGetNumber0(BoundaryPatches,PatchID,StartIdx,StopIdx,Err)
+
+    !Argument variables
+    INTEGER(INTG),      INTENT(IN)  :: BoundaryPatches(:)   !< The boundary patch labels for all boundary nodes
+    INTEGER(INTG),      INTENT(IN)  :: PatchID              !< The desired boundary patch label
+    INTEGER(INTG),      INTENT(OUT) :: StartIdx             !< On return, first index for corresponding PatchID
+    INTEGER(INTG),      INTENT(OUT) :: StopIdx              !< On return, last index for corresponding PatchID
+    INTEGER(INTG),      INTENT(OUT) :: Err                  !< The error code.
+    !Local variables
+    LOGICAL                         :: BoundaryFound
+    INTEGER(INTG)                   :: NodeIdx,NumberOfPatchIDs
+
+    ENTERS("cmfe_ImportedMesh_SurfaceGetNumber0",err,error,*999)
+
+    BoundaryFound=.FALSE.
+    NumberOfPatchIDs=BoundaryPatches(1)
+    ! Check for minimum length of BoundaryPatches variables
+    IF(SIZE(BoundaryPatches)<1+3*NumberOfPatchIDs) CALL FlagError("BoundaryPatches variable has incompatible size.",Err,Error,*999)
+    ! Set index to first non-header index
+    StartIdx=2+NumberOfPatchIDs*2
+    StopIdx=1+NumberOfPatchIDs*2
+    ! Set StartIdx and StopIdx for given PatchID
+    DO NodeIdx=2,NumberOfPatchIDs+1
+      StopIdx=StopIdx+BoundaryPatches(NodeIdx)
+      IF(BoundaryPatches(NodeIdx+NumberOfPatchIDs)==PatchID) THEN
+        BoundaryFound=.TRUE.
+        EXIT
+      ELSE
+        StartIdx=StartIdx+BoundaryPatches(NodeIdx)
+      END IF
+    END DO
+    IF(.NOT.BoundaryFound) CALL FlagError("Could not find boundary patch ID.",Err,Error,*999)
+
+    EXITS("cmfe_ImportedMesh_SurfaceGetNumber0")
+    RETURN
+999 ERRORSEXITS("cmfe_ImportedMesh_SurfaceGetNumber0",Err,Error)
+    CALL cmfe_HandleError(Err,Error)
+    RETURN
+  END SUBROUTINE cmfe_ImportedMesh_SurfaceGetNumber0
+
 END MODULE OpenCMISS_Iron

@@ -5,6 +5,7 @@ MODULE Custom_Profiling
   USE KINDS
   IMPLICIT NONE
   PRIVATE
+#include "mpif.h"
 
   PUBLIC :: CustomProfilingStart
   PUBLIC :: CustomProfilingStop
@@ -14,6 +15,7 @@ MODULE Custom_Profiling
   PUBLIC :: CustomProfilingGetMemory
   PUBLIC :: CustomProfilingGetSizePerElement
   PUBLIC :: CustomProfilingGetNumberObjects
+  PUBLIC :: CustomProfilingReset
   PRIVATE :: GetDurationIndex
   PRIVATE :: GetMemoryIndex
   PRIVATE :: PrintWarningDuration
@@ -21,6 +23,7 @@ MODULE Custom_Profiling
 
   INTEGER, PARAMETER :: IDENTIFIER_LENGTH = 80
   INTEGER, PARAMETER :: NUMBER_OF_RECORDS = 200
+  LOGICAL, PARAMETER ::  WITH_MEMORY_CONSUMPTION_MEASUREMENT = .FALSE.   ! enable this for measuring of memory consumption increase between timing markers
 
   CHARACTER(LEN=IDENTIFIER_LENGTH), DIMENSION(NUMBER_OF_RECORDS) :: DurationIdentifiers    !< identifiers for duration records
   CHARACTER(LEN=IDENTIFIER_LENGTH), DIMENSION(NUMBER_OF_RECORDS) :: MemoryIdentifiers      !< identifier for memory records
@@ -49,20 +52,24 @@ CONTAINS
     INTEGER :: CurrentIndex
 
     ! find index of identifier
-!    CurrentIndex = GetDurationIndex(Identifier)
-!
-!    ! If record with this identifier does not yet exist, create new
-!    IF (CurrentIndex == 0) THEN
-!      SizeDuration = SizeDuration + 1
-!      CurrentIndex = SizeDuration
-!      DurationIdentifiers(CurrentIndex) = Identifier
-!      Durations(CurrentIndex) = 0.0_8
-!      TimeCount(CurrentIndex) = 0
-!      StartMemory(CurrentIndex) = GetCurrentMemoryConsumption()
-!      TotalMemory(CurrentIndex) = 0
-!    ENDIF
-!
-!    CALL CPU_TIME(StartTime(CurrentIndex))
+    CurrentIndex = GetDurationIndex(Identifier)
+
+    ! If record with this identifier does not yet exist, create new
+    IF (CurrentIndex == 0) THEN
+      SizeDuration = SizeDuration + 1
+      CurrentIndex = SizeDuration
+      DurationIdentifiers(CurrentIndex) = Identifier
+      Durations(CurrentIndex) = 0.0_8
+      TimeCount(CurrentIndex) = 0
+      
+      IF (WITH_MEMORY_CONSUMPTION_MEASUREMENT) THEN
+        StartMemory(CurrentIndex) = GetCurrentMemoryConsumption()
+        TotalMemory(CurrentIndex) = 0
+      ENDIF
+    ENDIF
+
+    !CALL CPU_TIME(StartTime(CurrentIndex))
+    StartTime(CurrentIndex) = MPI_WTIME()
   END SUBROUTINE
   !
   !================================================================================================================================
@@ -72,26 +79,29 @@ CONTAINS
     CHARACTER(LEN=*), INTENT(IN)  :: Identifier !< A custom Identifier that describes the timer
 
     ! LOCAL VARIABLES
-    INTEGER :: CurrentIndex, I
+    INTEGER :: CurrentIndex
     REAL(8) :: EndTime, Duration
 
     !CALL CPU_TIME(EndTime)
-    !
-    !! find index of identifier
-    !CurrentIndex = GetDurationIndex(Identifier)
-    !
-    !IF (CurrentIndex == 0) THEN
-    !  CALL PrintWarningDuration(Identifier)
-    !  RETURN
-    !ENDIF
-    !
-    !Duration = EndTime - StartTime(CurrentIndex)
-    !Durations(CurrentIndex) = Durations(CurrentIndex) + Duration
-    !TimeCount(CurrentIndex) = TimeCount(CurrentIndex) + 1
-    !
-    !CurrentMemoryConsumption = GetCurrentMemoryConsumption()
-    !TotalMemory(CurrentIndex) = TotalMemory(CurrentIndex) + (CurrentMemoryConsumption - StartMemory(CurrentIndex))
-    !StartMemory(CurrentIndex) = CurrentMemoryConsumption
+    EndTime = MPI_WTIME()
+    
+    ! find index of identifier
+    CurrentIndex = GetDurationIndex(Identifier)
+    
+    IF (CurrentIndex == 0) THEN
+      CALL PrintWarningDuration(Identifier)
+      RETURN
+    ENDIF
+    
+    Duration = EndTime - StartTime(CurrentIndex)
+    Durations(CurrentIndex) = Durations(CurrentIndex) + Duration
+    TimeCount(CurrentIndex) = TimeCount(CurrentIndex) + 1
+    
+    IF (WITH_MEMORY_CONSUMPTION_MEASUREMENT) THEN
+      CurrentMemoryConsumption = GetCurrentMemoryConsumption()
+      TotalMemory(CurrentIndex) = TotalMemory(CurrentIndex) + (CurrentMemoryConsumption - StartMemory(CurrentIndex))
+      StartMemory(CurrentIndex) = CurrentMemoryConsumption
+    ENDIF
   END SUBROUTINE
 
   !
@@ -108,33 +118,41 @@ CONTAINS
     INTEGER :: CurrentIndex
     INTEGER(INTG) :: SizePerElement  !< number of bytes of one element
 
-    !MemoryConsumption = REAL(TotalSize, LINTG)
-    !
-    !IF (NumberOfElements > 0) THEN
-    !  SizePerElement = TotalSize / NumberOfElements
-    !ELSE
-    !  SizePerElement = 1
-    !ENDIF
-    !
-    !! find index of identifier
-    !CurrentIndex = GetMemoryIndex(Identifier)
-    !
-    !! If record with this identifier does not yet exist, create new
-    !IF (CurrentIndex == 0) THEN
-    !  SizeMemory = SizeMemory + 1
-    !  CurrentIndex = SizeMemory
-    !  MemoryIdentifiers(CurrentIndex) = Identifier
-    !  MemoryConsumptions(CurrentIndex) = 0
-    !  SizesPerElement(CurrentIndex) = 0
-    !  NumberOfObjects(CurrentIndex) = 0
-    !ENDIF
-    !
-    !! Add value to record of memory consumption
-    !MemoryConsumptions(CurrentIndex) = MemoryConsumptions(CurrentIndex) + MemoryConsumption
-    !SizesPerElement(CurrentIndex) = SizePerElement
-    !NumberOfObjects(CurrentIndex) = NumberOfObjects(CurrentIndex) + 1
+    MemoryConsumption = INT8(TotalSize)
+    
+    IF (NumberOfElements > 0) THEN
+      SizePerElement = TotalSize / NumberOfElements
+    ELSE
+      SizePerElement = 1
+    ENDIF
+    
+    ! find index of identifier
+    CurrentIndex = GetMemoryIndex(Identifier)
+    
+    ! If record with this identifier does not yet exist, create new
+    IF (CurrentIndex == 0) THEN
+      SizeMemory = SizeMemory + 1
+      CurrentIndex = SizeMemory
+      MemoryIdentifiers(CurrentIndex) = Identifier
+      MemoryConsumptions(CurrentIndex) = 0
+      SizesPerElement(CurrentIndex) = 0
+      NumberOfObjects(CurrentIndex) = 0
+    ENDIF
+    
+    ! Add value to record of memory consumption
+    MemoryConsumptions(CurrentIndex) = MemoryConsumptions(CurrentIndex) + MemoryConsumption
+    SizesPerElement(CurrentIndex) = SizePerElement
+    NumberOfObjects(CurrentIndex) = NumberOfObjects(CurrentIndex) + 1
 
   END SUBROUTINE
+  !
+  !================================================================================================================================
+  !
+  SUBROUTINE CustomProfilingReset()
+    ! reset is done by dropping the values in Duration* and Memory* fields
+    SizeDuration = 0
+    SizeMemory = 0
+  END SUBROUTINE CustomProfilingReset
   !
   !================================================================================================================================
   !
@@ -146,7 +164,7 @@ CONTAINS
 
     GetDurationIndex = 0
 
-    DO I=1,SizeDuration
+    DO I=SizeDuration,1,-1
       IF (TRIM(DurationIdentifiers(I)) == Identifier) THEN
       GetDurationIndex = I
       EXIT
@@ -164,7 +182,7 @@ CONTAINS
 
     GetMemoryIndex = 0
 
-    DO I=1,SizeMemory
+    DO I=SizeMemory,1,-1
       IF (TRIM(MemoryIdentifiers(I)) == Identifier) THEN
       GetMemoryIndex = I
       EXIT
@@ -195,7 +213,6 @@ CONTAINS
     ENDIF
 
   END FUNCTION GetCurrentMemoryConsumption
-
   !
   !================================================================================================================================
   !
@@ -214,13 +231,15 @@ CONTAINS
       CustomProfilingGetInfo = TRIM(CustomProfilingGetInfo) // TRIM(Line)
     ENDDO
 
-    CustomProfilingGetInfo = TRIM(CustomProfilingGetInfo) // "Memory Consumption while Timing" // NEW_LINE('A')
-    DO I = 1,SizeDuration
-      WRITE(Line,"(3A,I17,A,I17,2A)") "   ", (DurationIdentifiers(I)), ": ", TotalMemory(I), ' B, avg.', &
-        & TotalMemory(I)/TimeCount(I), ' B per profiling interval, ', NEW_LINE('A')
-      CustomProfilingGetInfo = TRIM(CustomProfilingGetInfo) // TRIM(Line)
-    ENDDO
-
+    IF (WITH_MEMORY_CONSUMPTION_MEASUREMENT) THEN
+      CustomProfilingGetInfo = TRIM(CustomProfilingGetInfo) // "Memory Consumption while Timing" // NEW_LINE('A')
+      DO I = 1,SizeDuration
+        WRITE(Line,"(3A,I17,A,I17,2A)") "   ", (DurationIdentifiers(I)), ": ", TotalMemory(I), ' B, avg.', &
+          & TotalMemory(I)/TimeCount(I), ' B per profiling interval, ', NEW_LINE('A')
+        CustomProfilingGetInfo = TRIM(CustomProfilingGetInfo) // TRIM(Line)
+      ENDDO
+    ENDIF
+    
     ! Collect memory consumption
     CustomProfilingGetInfo = TRIM(CustomProfilingGetInfo) // "Static Memory Consumption" // NEW_LINE('A')
     TotalNumberOfObjects = 0
