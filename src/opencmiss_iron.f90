@@ -62899,15 +62899,15 @@ CONTAINS
           ! Quadratic tetrahedron
           Permutation       =  0
           Permutation(1)    =  1
-          Permutation(2)    =  5
-          Permutation(3)    =  2
-          Permutation(4)    =  6
-          Permutation(5)    =  7
-          Permutation(6)    =  3
+          Permutation(2)    =  2
+          Permutation(3)    =  3
+          Permutation(4)    =  4
+          Permutation(5)    =  5
+          Permutation(6)    =  6
           Permutation(7)    =  8
-          Permutation(8)    =  9
+          Permutation(8)    =  7
           Permutation(9)    = 10
-          Permutation(10)   =  4
+          Permutation(10)   =  9
           NumberOfBoundaryPatchComponents = 8_INTG
         CASE(27)
           ! Quadratic hexahedron
