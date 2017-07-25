@@ -76,10 +76,11 @@ MODULE SOLVER_ROUTINES
   IMPLICIT NONE
 
   PRIVATE
-  
+
 #include "mpif.h"  
   
   LOGICAL, PUBLIC :: DEBUG_MODE_A = .FALSE. ! from Aaron
+
   
   ! Timing variables
   REAL(DP), PUBLIC :: TIMING_ODE_SOLVER = 0_DP
@@ -382,8 +383,7 @@ MODULE SOLVER_ROUTINES
   INTEGER(INTG), PARAMETER :: SOLVER_DAE_BDF=5 !<General BDF differential-algebraic equation solver \see SOLVER_ROUTINES_DAESolverTypes,SOLVER_ROUTINES
   INTEGER(INTG), PARAMETER :: SOLVER_DAE_RUSH_LARSON=6 !<Rush-Larson differential-algebraic equation solver \see SOLVER_ROUTINES_DAESolverTypes,SOLVER_ROUTINES
   INTEGER(INTG), PARAMETER :: SOLVER_DAE_EXTERNAL=7 !<External (e.g., CellML generated) differential-algebraic equation solver \see SOLVER_ROUTINES_DAESolverTypes,SOLVER_ROUTINES
-  INTEGER(INTG), PARAMETER :: SOLVER_DAE_GL=8 !<General Linear differential-algebraic equation solver (\)see SOLVER_ROUTINES_DAESolverTypes,SOLVER_ROUTINES
-  
+  INTEGER(INTG), PARAMETER :: SOLVER_DAE_GL=8 !<General Linear differential-algebraic equation solver (\)see SOLVER_ROUTINES_DAESolverTypes,SOLVER_ROUTINES  
   !>@}
 
   !> \addtogroup SOLVER_ROUTINES_EulerDAESolverTypes SOLVER_ROUTINES::EulerDAESolverTypes
@@ -560,7 +560,8 @@ MODULE SOLVER_ROUTINES
 
   PUBLIC SOLVER_CELLML_EQUATIONS_GET
 
-  PUBLIC SOLVER_DAE_SOLVER_TYPE_GET,SOLVER_DAE_SOLVER_TYPE_SET
+  PUBLIC SOLVER_DAE_SOLVER_TYPE_GET,SOLVER_DAE_SOLVER_TYPE_SET, &
+   & SOLVER_DAE_EULER_FORWARD_SET_NSTEPS,SOLVER_DAE_EULER_IMPROVED_SET_NSTEPS
 
   PUBLIC SOLVER_DAE_TIMES_SET,SOLVER_DAE_TIME_STEP_SET, SOLVER_DAE_BDF_SET_TOLERANCE
 
@@ -2090,7 +2091,7 @@ CONTAINS
   SUBROUTINE SOLVER_DAE_EULER_FORWARD_INITIALISE(EULER_DAE_SOLVER,ERR,ERROR,*)
 
     !Argument variables
-    TYPE(EULER_DAE_SOLVER_TYPE), POINTER :: EULER_DAE_SOLVER !<A pointer the Euler differential-algebraic equation solver to initialise a forward Euler solver for
+    TYPE(EULER_DAE_SOLVER_TYPE), POINTER :: EULER_DAE_SOLVER !<A pointer to the Euler differential-algebraic equation solver to initialise a forward Euler solver for
     INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
     TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
     !Local Variables
@@ -2111,6 +2112,7 @@ CONTAINS
         EULER_DAE_SOLVER%FORWARD_EULER_SOLVER%EULER_DAE_SOLVER=>EULER_DAE_SOLVER
         EULER_DAE_SOLVER%FORWARD_EULER_SOLVER%SOLVER_LIBRARY=SOLVER_CMISS_LIBRARY
         !Defaults
+        EULER_DAE_SOLVER%FORWARD_EULER_SOLVER%TIME_STEPS_NUMBER=-1
       ENDIF
     ELSE
       CALL FlagError("Euler differential-algebraic equation solver is not associated.",ERR,ERROR,*998)
@@ -2129,17 +2131,17 @@ CONTAINS
   !
 
   !>Integrate using a forward Euler differential-algebraic equation solver.
-  SUBROUTINE SOLVER_DAE_EULER_FORWARD_INTEGRATE(FORWARD_EULER_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_INCREMENT_I, &
+  SUBROUTINE SOLVER_DAE_EULER_FORWARD_INTEGRATE(FORWARD_EULER_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_INCREMENT, &
     & ONLY_ONE_MODEL_INDEX,MODELS_DATA,MAX_NUMBER_STATES,STATE_DATA,MAX_NUMBER_PARAMETERS,PARAMETERS_DATA, &
     & MAX_NUMBER_INTERMEDIATES,INTERMEDIATE_DATA,ERR,ERROR,*)
 
     !Argument variables
-    TYPE(FORWARD_EULER_DAE_SOLVER_TYPE), POINTER :: FORWARD_EULER_SOLVER !<A pointer the forward Euler differential-algebraic equation solver to integrate
+    TYPE(FORWARD_EULER_DAE_SOLVER_TYPE), POINTER :: FORWARD_EULER_SOLVER !<A pointer to the forward Euler differential-algebraic equation solver to integrate
     TYPE(CELLML_TYPE), POINTER :: CELLML !<A pointer to the CellML environment to integrate the equations for.
     INTEGER(INTG), INTENT(IN) :: N !<The number of degrees-of-freedom
     REAL(DP), INTENT(IN) :: START_TIME !<The start time for the integration
     REAL(DP), INTENT(IN) :: END_TIME !<The end time for the integration
-    REAL(DP), INTENT(INOUT) :: TIME_INCREMENT_I !<The (initial) time increment for the integration
+    REAL(DP), INTENT(INOUT) :: TIME_INCREMENT !<The (initial) time increment for the integration. Will be suited to time interval (START_TIME,END_TIME) or calculated new, if Forward Euler DAE solvers TIME_STEPS_NUMBER is set.
     INTEGER(INTG), INTENT(IN) :: ONLY_ONE_MODEL_INDEX !<If only one model is used in the models data the index of that model. 0 otherwise.
     INTEGER(INTG), POINTER :: MODELS_DATA(:) !<MODELS_DATA(dof_idx). The models data for the dof_idx'th dof.
     INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_STATES !<The maximum number of state variables per dof
@@ -2154,15 +2156,23 @@ CONTAINS
     INTEGER(INTG) :: dof_idx,DOF_ORDER_TYPE,INTERMEDIATE_END_DOF,intermediate_idx,INTERMEDIATE_START_DOF,model_idx, &
       & NUMBER_INTERMEDIATES,NUMBER_PARAMETERS,NUMBER_STATES,PARAMETER_END_DOF,parameter_idx,PARAMETER_START_DOF, &
       & STATE_END_DOF,state_idx,STATE_START_DOF
+    INTEGER(INTG) :: TS_NUMBER, TIME_STEP
     REAL(DP) :: INTERMEDIATES(MAX(1,MAX_NUMBER_INTERMEDIATES)),PARAMETERS(MAX(1,MAX_NUMBER_PARAMETERS)), &
-      & RATES(MAX(1,MAX_NUMBER_STATES)),STATES(MAX(1,MAX_NUMBER_STATES)),TIME
+      & RATES(MAX(1,MAX_NUMBER_STATES)),STATES(MAX(1,MAX_NUMBER_STATES))
     TYPE(CELLML_MODEL_TYPE), POINTER :: MODEL
     TYPE(VARYING_STRING) :: LOCAL_ERROR
-    REAL(DP) :: TIME_INCREMENT
     
     ENTERS("SOLVER_DAE_EULER_FORWARD_INTEGRATE",ERR,ERROR,*999)
     
-    TIME_INCREMENT=TIME_INCREMENT_I
+    !Set up the right way to integrate. (make sure that we leave with TMIE==END_TIME)
+    !We take a fixed amount of steps to yield the integration result at exactly t=END_TIME, using the same step size at every step.
+    IF(FORWARD_EULER_SOLVER%TIME_STEPS_NUMBER==-1) THEN
+      TS_NUMBER = CEILING((END_TIME-START_TIME)/TIME_INCREMENT)
+    ELSE
+      TS_NUMBER = FORWARD_EULER_SOLVER%TIME_STEPS_NUMBER
+    ENDIF
+    
+    TIME_INCREMENT = (END_TIME-START_TIME)/TS_NUMBER
 
     IF(ASSOCIATED(FORWARD_EULER_SOLVER)) THEN
       IF(ASSOCIATED(CELLML)) THEN
@@ -2172,9 +2182,7 @@ CONTAINS
             !Dof components are separated. Will need to copy data to temporary arrays.
             IF(ONLY_ONE_MODEL_INDEX==CELLML_MODELS_FIELD_NOT_CONSTANT) THEN
               !Mulitple models
-              DO WHILE(TIME<END_TIME)!Aaron changed this (was '<='). until now, we made a step too much. Additionally, the last step size is chosen s.t. we end up with TIME==END_TIME, when leaving.
-                !prepare time increment: (actually, this needs only to be done at most once at the last step. so most of the time it might just be an expensive evaluation. ..-> better idea?!)
-                TIME_INCREMENT=MIN(TIME_INCREMENT,END_TIME-TIME)
+              DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
                 DO dof_idx=1,N
                   model_idx=MODELS_DATA(dof_idx)
                   IF(model_idx.GT.0) THEN
@@ -2193,8 +2201,8 @@ CONTAINS
                       ENDDO !parameter_idx
 
 #ifdef WITH_CELLML
-                      CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME,STATES,RATES,INTERMEDIATES, &
-                        & PARAMETERS)
+                      CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT & !rhs is evaluated at 'old time', t_n. 
+                        & ,STATES,RATES,INTERMEDIATES,PARAMETERS)
 #else
                       CALL FlagError("Must compile with WITH_CELLML ON to use CellML functionality.",ERR,ERROR,*999)
 #endif
@@ -2206,7 +2214,6 @@ CONTAINS
                       DO state_idx=1,NUMBER_STATES
                         STATE_DATA((dof_idx-1)*N+state_idx)=STATES(state_idx)+TIME_INCREMENT*RATES(state_idx)
                       ENDDO !state_idx
-
                     ELSE
                       LOCAL_ERROR="CellML environment model is not associated for model index "// &
                         & TRIM(NumberToVString(ONLY_ONE_MODEL_INDEX,"*",ERR,ERROR))//" belonging to dof index "// &
@@ -2215,8 +2222,7 @@ CONTAINS
                     ENDIF
                   ENDIF !model_idx
                 ENDDO !dof_idx
-                TIME=TIME+TIME_INCREMENT
-              ENDDO !time
+              ENDDO !TIME_STEP
             ELSE
               !Only one model is used.
               MODEL=>CELLML%MODELS(ONLY_ONE_MODEL_INDEX)%PTR
@@ -2224,12 +2230,8 @@ CONTAINS
                 NUMBER_STATES=MODEL%NUMBER_OF_STATE
                 NUMBER_INTERMEDIATES=MODEL%NUMBER_OF_INTERMEDIATE
                 NUMBER_PARAMETERS=MODEL%NUMBER_OF_PARAMETERS
-                TIME=START_TIME
-                DO WHILE(TIME<END_TIME)!Aaron changed this (was '<='). until now, we made a step too much. Additionally, the last step size is chosen s.t. we end up with TIME==END_TIME, when leaving.
-                  !prepare time increment: (actually, this needs only to be done at most once at the last step. so most of the time it might just be an expensive evaluation. ..-> better idea?!)
-                  TIME_INCREMENT=MIN(TIME_INCREMENT,END_TIME-TIME)
+                DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
                   DO dof_idx=1,N
-
                     model_idx=MODELS_DATA(dof_idx)
                     IF(model_idx.GT.0) THEN
                       !Copy CellML data to temporary arrays
@@ -2241,8 +2243,8 @@ CONTAINS
                       ENDDO !parameter_idx
 
 #ifdef WITH_CELLML
-                      CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME,STATES,RATES,INTERMEDIATES, &
-                        & PARAMETERS)
+                      CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, & !rhs is evaluated at 'old time', t_n. 
+                        & STATES,RATES,INTERMEDIATES,PARAMETERS)
 #else
                       CALL FlagError("Must compile with WITH_CELLML ON to use CellML functionality.",ERR,ERROR,*999)
 #endif
@@ -2256,8 +2258,7 @@ CONTAINS
                       ENDDO !state_idx
                     ENDIF !model_idx
                   ENDDO !dof_idx
-                  TIME=TIME+TIME_INCREMENT
-                  ENDDO !time
+                ENDDO !TIME_STEP
               ELSE
                 LOCAL_ERROR="CellML environment model is not associated for model index "// &
                   & TRIM(NumberToVString(ONLY_ONE_MODEL_INDEX,"*",ERR,ERROR))//"."
@@ -2268,10 +2269,7 @@ CONTAINS
             !Dof components are continguous. Can pass data directly.
             IF(ONLY_ONE_MODEL_INDEX==CELLML_MODELS_FIELD_NOT_CONSTANT) THEN
               !Mulitple models
-              TIME=START_TIME
-              DO WHILE(TIME<END_TIME)!Aaron changed this (was '<='). until now, we made a step too much. Additionally, the last step size is chosen s.t. we end up with TIME==END_TIME, when leaving.
-                !prepare time increment: (actually, this needs only to be done at most once at the last step. so most of the time it might just be an expensive evaluation. ..-> better idea?!)
-                TIME_INCREMENT=MIN(TIME_INCREMENT,END_TIME-TIME)
+              DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
                 DO dof_idx=1,N
                   model_idx=MODELS_DATA(dof_idx)
                   IF(model_idx==0) THEN
@@ -2298,9 +2296,9 @@ CONTAINS
                             PARAMETER_START_DOF=(dof_idx-1)*MAX_NUMBER_PARAMETERS+1
                             PARAMETER_END_DOF=PARAMETER_START_DOF+NUMBER_PARAMETERS-1
 
-                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME,STATE_DATA(STATE_START_DOF: &
-                              & STATE_END_DOF),RATES,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF), &
-                              & PARAMETERS_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT &
+                              & ,STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF: &
+                              & INTERMEDIATE_END_DOF),PARAMETERS_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
 
                           ELSE
                             !We do not have parameters in the model
@@ -2310,9 +2308,9 @@ CONTAINS
                             INTERMEDIATE_START_DOF=(dof_idx-1)*MAX_NUMBER_INTERMEDIATES+1
                             INTERMEDIATE_END_DOF=INTERMEDIATE_START_DOF+NUMBER_INTERMEDIATES-1
 
-                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME,STATE_DATA(STATE_START_DOF: &
-                              & STATE_END_DOF),RATES,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF), &
-                              & PARAMETERS)
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT &
+                              & ,STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES &
+                              & ,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF),PARAMETERS)
 
                            ENDIF
                         ELSE
@@ -2323,16 +2321,17 @@ CONTAINS
                             PARAMETER_START_DOF=(dof_idx-1)*MAX_NUMBER_PARAMETERS+1
                             PARAMETER_END_DOF=PARAMETER_START_DOF+NUMBER_PARAMETERS-1
 
-                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME,STATE_DATA(STATE_START_DOF: &
-                              & STATE_END_DOF),RATES,INTERMEDIATES,PARAMETERS_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT &
+                              & ,STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATES &
+                              & ,PARAMETERS_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
 
                           ELSE
                             !We do not have intermediates or parameters in the model
                             STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
                             STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
 
-                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME,STATE_DATA(STATE_START_DOF: &
-                              & STATE_END_DOF),RATES,INTERMEDIATES,PARAMETERS)
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT &
+                              & ,STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATES,PARAMETERS)
 
                           ENDIF
                         ENDIF
@@ -2358,8 +2357,7 @@ CONTAINS
                     CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
                   ENDIF
                 ENDDO !dof_idx
-                TIME=TIME+TIME_INCREMENT
-              ENDDO !time
+              ENDDO !TIME_STEP
             ELSE
               !One one model is used.
               MODEL=>CELLML%MODELS(ONLY_ONE_MODEL_INDEX)%PTR
@@ -2375,11 +2373,7 @@ CONTAINS
                   IF(NUMBER_INTERMEDIATES>0) THEN
                     IF(NUMBER_PARAMETERS>0) THEN
                       !We have states, intermediate and parameters for the model
-
-                      TIME=START_TIME
-                      DO WHILE(TIME<END_TIME)!Aaron changed this (was '<='). until now, we made a step too much. Additionally, the last step size is chosen s.t. we end up with TIME==END_TIME, when leaving.
-                        !prepare time increment: (actually, this needs only to be done at most once at the last step. so most of the time it might just be an expensive evaluation. ..-> better idea?!)
-                        TIME_INCREMENT=MIN(TIME_INCREMENT,END_TIME-TIME)
+                      DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
                         DO dof_idx=1,N
                           model_idx=MODELS_DATA(dof_idx)
                           IF(model_idx.GT.0) THEN
@@ -2394,18 +2388,18 @@ CONTAINS
 #ifdef TAUPROF
                             CALL TAU_STATIC_PHASE_START('cellml call rhs')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                            CALL CustomProfilingStart('cellml call rhs')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStart('cellml call rhs')
+!#endif
 
-                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME, &
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
                               & STATE_DATA(STATE_START_DOF:STATE_END_DOF), &
                               & RATES,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF),PARAMETERS_DATA( &
                               & PARAMETER_START_DOF:PARAMETER_END_DOF))
 
-#ifdef USE_CUSTOM_PROFILING
-                            CALL CustomProfilingStop('cellml call rhs')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStop('cellml call rhs')
+!#endif
 #ifdef TAUPROF
                             CALL TAU_STATIC_PHASE_STOP('cellml call rhs')
 #endif
@@ -2413,24 +2407,21 @@ CONTAINS
                             STATE_DATA(STATE_START_DOF:STATE_END_DOF)=STATE_DATA(STATE_START_DOF:STATE_END_DOF)+ &
                               & TIME_INCREMENT*RATES(1:NUMBER_STATES)
                           ENDIF !model_idx  
-                          IF(DEBUG_MODE_A .AND. dof_idx == 1 .AND. TIME+TIME_INCREMENT==END_TIME) THEN
-                            WRITE(*,*) 'time stepping to:'
+                          ! produce some output to see state evolution after each meso time step size (1D model time step size)
+                          IF(dof_idx == 1 .AND. DEBUG_MODE_A) THEN
+                            WRITE(*,*)'======================================',START_TIME + TIME_STEP*TIME_INCREMENT, '========'
                             DO model_idx=0,NUMBER_STATES-1
                               WRITE(*,*) STATE_DATA(STATE_START_DOF+model_idx)
                             ENDDO
-                            WRITE(*,*) ''
                             model_idx=MODELS_DATA(1)
+                            WRITE(*,*) ''
                           ENDIF
                         ENDDO !dof_idx
-                        TIME=TIME+TIME_INCREMENT
-                      ENDDO !time
+                      ENDDO !TIME_STEP
                     
                     ELSE
                       !We do not have parameters in the model
-                      TIME=START_TIME
-                      DO WHILE(TIME<END_TIME)!Aaron changed this (was '<='). until now, we made a step too much. Additionally, the last step size is chosen s.t. we end up with TIME==END_TIME, when leaving.
-                        !prepare time increment: (actually, this needs only to be done at most once at the last step. so most of the time it might just be an expensive evaluation. ..-> better idea?!)
-                        TIME_INCREMENT=MIN(TIME_INCREMENT,END_TIME-TIME)
+                      DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
                         DO dof_idx=1,N
                           model_idx=MODELS_DATA(dof_idx)
                           IF(model_idx.GT.0) THEN
@@ -2440,7 +2431,7 @@ CONTAINS
                             INTERMEDIATE_START_DOF=(dof_idx-1)*MAX_NUMBER_INTERMEDIATES+1
                             INTERMEDIATE_END_DOF=INTERMEDIATE_START_DOF+NUMBER_INTERMEDIATES-1
 
-                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME, &
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
                               & STATE_DATA(STATE_START_DOF:STATE_END_DOF), &
                               & RATES,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF),PARAMETERS)
 
@@ -2448,16 +2439,12 @@ CONTAINS
                               & TIME_INCREMENT*RATES(1:NUMBER_STATES)
                           ENDIF !model_idx
                         ENDDO !dof_idx
-                        TIME=TIME+TIME_INCREMENT
                       ENDDO !time
                     ENDIF
                   ELSE
                   !We do not have intermediates in the model
-                    IF(NUMBER_PARAMETERS>0) THEN
-                      TIME=START_TIME              
-                      DO WHILE(TIME<END_TIME)!Aaron changed this (was '<='). until now, we made a step too much. Additionally, the last step size is chosen s.t. we end up with TIME==END_TIME, when leaving.
-                        !prepare time increment: (actually, this needs only to be done at most once at the last step. so most of the time it might just be an expensive evaluation. ..-> better idea?!)
-                        TIME_INCREMENT=MIN(TIME_INCREMENT,END_TIME-TIME)
+                    IF(NUMBER_PARAMETERS>0) THEN     
+                      DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
                         DO dof_idx=1,N
                           model_idx=MODELS_DATA(dof_idx)
                           IF(model_idx.GT.0) THEN
@@ -2466,34 +2453,37 @@ CONTAINS
                             STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
                             PARAMETER_START_DOF=(dof_idx-1)*MAX_NUMBER_PARAMETERS+1
                             PARAMETER_END_DOF=PARAMETER_START_DOF+NUMBER_PARAMETERS-1
-
-                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME, &
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_START('cellml call rhs')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStart('cellml call rhs')
+!#endif
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
                               & STATE_DATA(STATE_START_DOF:STATE_END_DOF), &
                               & RATES,INTERMEDIATES,PARAMETERS_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
-
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStop('cellml call rhs')
+!#endif
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_STOP('cellml call rhs')
+#endif
                             STATE_DATA(STATE_START_DOF:STATE_END_DOF)=STATE_DATA(STATE_START_DOF:STATE_END_DOF)+ &
                               & TIME_INCREMENT*RATES(1:NUMBER_STATES)
                           ENDIF !model_idx
                           IF(dof_idx == 1 .AND. DEBUG_MODE_A) THEN
-                           WRITE(*,*) 'Stepping forward by',TIME_INCREMENT,'time instances. State afterwards:'
-                           DO model_idx=0,NUMBER_STATES-1
-                             WRITE(*,*) STATE_DATA(STATE_START_DOF+model_idx)
-                           ENDDO
-                           IF(TIME_INCREMENT/=TIME_INCREMENT_I)THEN
-                             WRITE(*,*)'===================================================',TIME_INCREMENT+TIME, '========'
-                           ENDIF
+                            WRITE(*,*)'======================================',START_TIME + TIME_STEP*TIME_INCREMENT, '========'
+                            DO model_idx=0,NUMBER_STATES-1
+                              WRITE(*,*) STATE_DATA(STATE_START_DOF+model_idx)
+                            ENDDO
+                            model_idx=MODELS_DATA(1)
                             WRITE(*,*) ''
-                           model_idx=MODELS_DATA(1)
                           ENDIF
                         ENDDO !dof_idx
-                        TIME=TIME+TIME_INCREMENT
-                      ENDDO !time
+                      ENDDO !TIME_STEP
                     ELSE
                       !We do not have intermediates or parameters in the model
-                      TIME=START_TIME
-                      DO WHILE(TIME<END_TIME)!Aaron changed this (was '<='). until now, we made a step too much. Additionally, the last step size is chosen s.t. we end up with TIME==END_TIME, when leaving.
-                        !prepare time increment: (actually, this needs only to be done at most once at the last step. so most of the time it might just be an expensive evaluation. ..-> better idea?!)
-                        TIME_INCREMENT=MIN(TIME_INCREMENT,END_TIME-TIME)
+                      DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
                         DO dof_idx=1,N
                           model_idx=MODELS_DATA(dof_idx)
                           IF(model_idx.GT.0) THEN
@@ -2501,7 +2491,7 @@ CONTAINS
                             STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
                             STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
 
-                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,TIME, &
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
                               & STATE_DATA(STATE_START_DOF:STATE_END_DOF), &
                               & RATES,INTERMEDIATES,PARAMETERS)
 
@@ -2509,8 +2499,7 @@ CONTAINS
                               & TIME_INCREMENT*RATES(1:NUMBER_STATES)
                           ENDIF !model_idx
                         ENDDO !dof_idx
-                        TIME=TIME+TIME_INCREMENT
-                      ENDDO !time
+                      ENDDO !TIME_STEP
                     ENDIF
                   ENDIF
                 ELSE
@@ -2544,6 +2533,47 @@ CONTAINS
     RETURN 1
 
   END SUBROUTINE SOLVER_DAE_EULER_FORWARD_INTEGRATE
+
+  !
+  !================================================================================================================================
+  !
+
+  !>Set the number of time steps to use for a forward Euler solver
+  SUBROUTINE SOLVER_DAE_EULER_FORWARD_SET_NSTEPS(DAE_SOLVER,NUMBER_OF_STEPS,ERR,ERROR,*)
+  
+    !Argument variables
+    TYPE(DAE_SOLVER_TYPE), POINTER :: DAE_SOLVER !<A pointer to the differential-algebraic equation solver of which the number of time steps shall be set
+    INTEGER(INTG) :: NUMBER_OF_STEPS !< The number to set TIME_STEPS_NUMBER to
+    INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
+    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
+    !Local Variables
+    
+    ENTERS("SOLVER_DAE_EULER_FORWARD_SET_NSTEPS",ERR,ERROR,*999)
+
+    IF(ASSOCIATED(DAE_SOLVER)) THEN
+      IF(ASSOCIATED(DAE_SOLVER%EULER_SOLVER)) THEN
+        IF(ASSOCIATED(DAE_SOLVER%EULER_SOLVER%FORWARD_EULER_SOLVER)) THEN
+          IF(NUMBER_OF_STEPS > 0) THEN
+            DAE_SOLVER%EULER_SOLVER%FORWARD_EULER_SOLVER%TIME_STEPS_NUMBER=NUMBER_OF_STEPS
+          ELSE
+            CALL FlagError("Invalid INTEGER value: NUMBER_OF_STEPS must be > 0.",ERR,ERROR,*999)
+          ENDIF
+        ELSE
+          CALL FlagError("Forward Euler solver is not associated.",ERR,ERROR,*999)
+        ENDIF
+      ELSE
+        CALL FlagError("Euler solver is not associated.",ERR,ERROR,*999)
+      ENDIF
+    ELSE
+      CALL FlagError("Differential-algebraic equation solver is not associated.",ERR,ERROR,*999)
+    ENDIF
+
+    EXITS("SOLVER_DAE_EULER_FORWARD_SET_NSTEPS")
+    RETURN
+999 ERRORSEXITS("SOLVER_DAE_EULER_FORWARD_SET_NSTEPS",ERR,ERROR)
+    RETURN 1
+
+  END SUBROUTINE SOLVER_DAE_EULER_FORWARD_SET_NSTEPS 
 
   !
   !================================================================================================================================
@@ -2606,35 +2636,35 @@ CONTAINS
 #ifdef TAUPROF
                       CALL TAU_STATIC_PHASE_START('1.1.1. cellml field2cellml update')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStart('1.1.1. cellml field2cellml update')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.1. cellml field2cellml update')
+!#endif
 
                       CALL CELLML_FIELD_TO_CELLML_UPDATE(CELLML_ENVIRONMENT,ERR,ERROR,*999)
 
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStop('1.1.1. cellml field2cellml update')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.1. cellml field2cellml update')
+!#endif
 #ifdef TAUPROF
                       CALL TAU_STATIC_PHASE_STOP('1.1.1. cellml field2cellml update')
                       CALL TAU_STATIC_PHASE_START('1.1.2. cellml field var get')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStart('1.1.2. cellml field var get')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.2. cellml field var get')
+!#endif
 
                       CALL FIELD_VARIABLE_GET(MODELS_FIELD,FIELD_U_VARIABLE_TYPE,MODELS_VARIABLE,ERR,ERROR,*999)
 
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStop('1.1.2. cellml field var get')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.2. cellml field var get')
+!#endif
 #ifdef TAUPROF
                       CALL TAU_STATIC_PHASE_STOP('1.1.2. cellml field var get')
                       CALL TAU_STATIC_PHASE_START('1.1.3. cellml data get')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStart('1.1.3. cellml data get')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.3. cellml data get')
+!#endif
 
                       CALL FIELD_PARAMETER_SET_DATA_GET(MODELS_FIELD,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
                         & MODELS_DATA,ERR,ERROR,*999)
@@ -2663,28 +2693,19 @@ CONTAINS
                         IF(ASSOCIATED(INTERMEDIATE_FIELD)) THEN
                           CALL FIELD_PARAMETER_SET_DATA_GET(INTERMEDIATE_FIELD,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
                             & INTERMEDIATE_DATA,ERR,ERROR,*999)
-                          IF(DEBUG_MODE_A) THEN
-                            WRITE(*,*) 'intermediate_field is associated for euler_forward_solve'
-                          ENDIF
                         ENDIF
-                         IF(DEBUG_MODE_A) THEN
-                            WRITE(*,*) 'intermediate_field? pointer yes, but null'
-                         ENDIF
-                      ENDIF
-                      IF(DEBUG_MODE_A) THEN
-                        WRITE(*,*) 'intermediate_field? not even pointer'
                       ENDIF
  
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStop('1.1.3. cellml data get')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.3. cellml data get')
+!#endif
 #ifdef TAUPROF
                       CALL TAU_STATIC_PHASE_STOP('1.1.3. cellml data get')
                       CALL TAU_STATIC_PHASE_START('1.1.4. cellml integrate')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStart('1.1.4. cellml integrate')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.4. cellml integrate')
+!#endif
 
                       !Integrate these CellML equations
                       CALL SOLVER_DAE_EULER_FORWARD_INTEGRATE(FORWARD_EULER_SOLVER,CELLML_ENVIRONMENT,MODELS_VARIABLE% &
@@ -2693,16 +2714,16 @@ CONTAINS
                         & MAXIMUM_NUMBER_OF_STATE,STATE_DATA,CELLML_ENVIRONMENT%MAXIMUM_NUMBER_OF_PARAMETERS, &
                         & PARAMETERS_DATA,CELLML_ENVIRONMENT%MAXIMUM_NUMBER_OF_INTERMEDIATE,INTERMEDIATE_DATA,ERR,ERROR,*999)
 
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStop('1.1.4. cellml integrate')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.4. cellml integrate')
+!#endif
 #ifdef TAUPROF
                       CALL TAU_STATIC_PHASE_STOP('1.1.4. cellml integrate')
                       CALL TAU_STATIC_PHASE_START('1.1.5. cellml data restore')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStart('1.1.5. cellml data restore')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.5. cellml data restore')
+!#endif
 
                       !Restore field data
                       CALL FIELD_PARAMETER_SET_DATA_RESTORE(MODELS_FIELD,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
@@ -2714,23 +2735,23 @@ CONTAINS
                       IF(ASSOCIATED(INTERMEDIATE_FIELD)) CALL FIELD_PARAMETER_SET_DATA_RESTORE(INTERMEDIATE_FIELD, &
                         & FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,INTERMEDIATE_DATA,ERR,ERROR,*999)
 
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStop('1.1.5. cellml data restore')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.5. cellml data restore')
+!#endif
 #ifdef TAUPROF
                       CALL TAU_STATIC_PHASE_STOP('1.1.5. cellml data restore')
                       CALL TAU_STATIC_PHASE_START('1.1.6. cellml field update')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStart('1.1.6. cellml field update')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.6. cellml field update')
+!#endif
 
                       !Make sure fields have been updated to the current value of any mapped CellML fields
                       CALL CELLML_CELLML_TO_FIELD_UPDATE(CELLML_ENVIRONMENT,ERR,ERROR,*999)
 
-#ifdef USE_CUSTOM_PROFILING
-                      CALL CustomProfilingStop('1.1.6. cellml field update')
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.6. cellml field update')
+!#endif
 #ifdef TAUPROF
                       CALL TAU_STATIC_PHASE_STOP('1.1.6. cellml field update')
 #endif
@@ -2752,7 +2773,7 @@ CONTAINS
                 ENDIF
               ENDDO !cellml_idx
             ELSE
-              CALL FlagError("Solver solver equations is not associated.",ERR,ERROR,*999)
+              CALL FlagError("CellML equations is not associated.",ERR,ERROR,*999)
             ENDIF
           ELSE
             CALL FlagError("Solver is not associated.",ERR,ERROR,*999)
@@ -2778,7 +2799,7 @@ CONTAINS
   !================================================================================================================================
   !
 
-  !>Finalise an improved Euler differential-algebaic equation and deallocate all memory.
+  !>Finalise an improved Euler differential-algebaic equation solver (Heun's method) and deallocate all memory.
   SUBROUTINE SOLVER_DAE_EULER_IMPROVED_FINALISE(IMPROVED_EULER_SOLVER,ERR,ERROR,*)
 
     !Argument variables
@@ -2804,7 +2825,7 @@ CONTAINS
   !================================================================================================================================
   !
 
-  !>Initialise an improved Euler solver for a differential-algebraic equation solver
+  !>Initialise an improved Euler solver for a differential-algebraic equation solver (Heun's method).
   SUBROUTINE SOLVER_DAE_EULER_IMPROVED_INITIALISE(EULER_DAE_SOLVER,ERR,ERROR,*)
 
     !Argument variables
@@ -2827,7 +2848,7 @@ CONTAINS
         IF(ERR/=0) CALL FlagError("Could not allocate improved Euler solver.",ERR,ERROR,*999)
         !Initialise
         EULER_DAE_SOLVER%IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER=>EULER_DAE_SOLVER
-        EULER_DAE_SOLVER%IMPROVED_EULER_SOLVER%SOLVER_LIBRARY=0
+        EULER_DAE_SOLVER%IMPROVED_EULER_SOLVER%SOLVER_LIBRARY=SOLVER_CMISS_LIBRARY
         !Defaults
       ENDIF
     ELSE
@@ -2845,24 +2866,801 @@ CONTAINS
   !
   !================================================================================================================================
   !
-
-  !>Solve using an improved Euler differential-algebraic equation solver.
-  SUBROUTINE SOLVER_DAE_EULER_IMPROVED_SOLVE(IMPROVED_EULER_SOLVER,ERR,ERROR,*)
-
+  
+  !>Integrate using an improved Euler differential-algebraic equation solver (Heun's method).
+  SUBROUTINE SOLVER_DAE_EULER_IMPROVED_INTEGRATE(IMPROVED_EULER_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_INCREMENT, &
+    & ONLY_ONE_MODEL_INDEX,MODELS_DATA,MAX_NUMBER_STATES,STATE_DATA,MAX_NUMBER_PARAMETERS,PARAMETER_DATA, &
+    & MAX_NUMBER_INTERMEDIATES,INTERMEDIATE_DATA,ERR,ERROR,*)
+    
     !Argument variables
-    TYPE(IMPROVED_EULER_DAE_SOLVER_TYPE), POINTER :: IMPROVED_EULER_SOLVER !<A pointer the improved Euler differential-algebraic equation solver to solve
+    TYPE(IMPROVED_EULER_DAE_SOLVER_TYPE), POINTER :: IMPROVED_EULER_SOLVER !<A pointer to the improved Euler differential-algebraic equation solver (Heun's method) to integrate.
+    TYPE(CELLML_TYPE), POINTER :: CELLML !<A pointer to the CellML environment to integrate the equations for.
+    INTEGER(INTG), INTENT(IN) :: N !<The number of degrees-of-freedom
+    REAL(DP), INTENT(IN) :: START_TIME !<The start time for the integration
+    REAL(DP), INTENT(IN) :: END_TIME !<The end time for the integration
+    REAL(DP), INTENT(INOUT) :: TIME_INCREMENT !<The (initial) time increment for the integration. Will be suited to time interval (START_TIME,END_TIME) or calculated new, if Forward Euler DAE solvers TIME_STEPS_NUMBER is set.
+    INTEGER(INTG), INTENT(IN) :: ONLY_ONE_MODEL_INDEX !<If only one model is used in the models data the index of that model. 0 otherwise.
+    INTEGER(INTG), POINTER :: MODELS_DATA(:) !<MODELS_DATA(dof_idx). The models data for the dof_idx'th dof.
+    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_STATES !<The maximum number of state variables per dof
+    REAL(DP), POINTER :: STATE_DATA(:) !<STATE_DATA(state_idx,dof_idx). The state data for the state_idx'th state variable of the dof_idx'th dof. state_idx varies from 1..NUMBER_STATES.
+    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_PARAMETERS !<The maximum number of parameter variables per dof.
+    REAL(DP), POINTER :: PARAMETER_DATA(:) !<PARAMETER_DATA(parameter_idx,dof_idx). The parameters data for the parameter_idx'th parameter variable of the dof_idx'th dof. parameter_idx varies from 1..NUMBER_PARAMETERS.
+    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_INTERMEDIATES !<The maximum number of intermediate variables per dof.
+    REAL(DP), POINTER :: INTERMEDIATE_DATA(:) !<INTERMEDIATE_DATA(intermediate_idx,dof_idx). The intermediate values data for the intermediate_idx'th intermediate variable of the dof_idx'th dof. intermediate_idx varies from 1.NUMBER_INTERMEDIATE
+    INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
+    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
+    
+    !Local Variables
+    INTEGER(INTG) :: dof_idx,DOF_ORDER_TYPE,INTERMEDIATE_END_DOF,intermediate_idx,INTERMEDIATE_START_DOF,model_idx, &
+      & NUMBER_INTERMEDIATES,NUMBER_PARAMETERS,NUMBER_STATES,PARAMETER_END_DOF,parameter_idx,PARAMETER_START_DOF, &
+      & STATE_END_DOF,state_idx,STATE_START_DOF
+    INTEGER(INTG) :: TS_NUMBER, TIME_STEP
+    REAL(DP) :: INTERMEDIATES(MAX(1,MAX_NUMBER_INTERMEDIATES)),PARAMETERS(MAX(1,MAX_NUMBER_PARAMETERS)), &
+      & RATES(MAX(1,MAX_NUMBER_STATES)),STATES(MAX(1,MAX_NUMBER_STATES)),STATES_TEMP(MAX(1,MAX_NUMBER_STATES)) &
+      & ,RATES_TEMP(MAX(1,MAX_NUMBER_STATES))
+    
+    TYPE(CELLML_MODEL_TYPE), POINTER :: MODEL
+    TYPE(VARYING_STRING) :: LOCAL_ERROR
+    
+    ENTERS("SOLVER_DAE_EULER_IMPROVED_INTEGRATE",ERR,ERROR,*999)
+    
+    ! Warning: computation of 'Intermediates' might not be correct.
+    
+    !Set up the right way to integrate. (make sure that we leave with TIME==END_TIME)------------------
+    !We take a fixed amount of steps to yield the integration result at exactly t=END_TIME, using the same step size at every step.
+    IF(IMPROVED_EULER_SOLVER%TIME_STEPS_NUMBER==-1) THEN
+      TS_NUMBER = CEILING((END_TIME-START_TIME)/TIME_INCREMENT)
+    ELSE
+      TS_NUMBER = IMPROVED_EULER_SOLVER%TIME_STEPS_NUMBER
+    ENDIF
+    TIME_INCREMENT = (END_TIME-START_TIME)/TS_NUMBER
+    !--------------------------------------------------------------------------------------------------
+
+    IF(ASSOCIATED(IMPROVED_EULER_SOLVER)) THEN
+      IF(ASSOCIATED(CELLML)) THEN
+        IF(ASSOCIATED(CELLML%MODELS_FIELD)) THEN
+          CALL FIELD_DOF_ORDER_TYPE_GET(CELLML%MODELS_FIELD%MODELS_FIELD,FIELD_U_VARIABLE_TYPE,DOF_ORDER_TYPE,ERR,ERROR,*999)
+          IF(DOF_ORDER_TYPE==FIELD_SEPARATED_COMPONENT_DOF_ORDER) THEN
+            !Dof components are separated. Will need to copy data to temporary arrays.
+            IF(ONLY_ONE_MODEL_INDEX==CELLML_MODELS_FIELD_NOT_CONSTANT) THEN
+              !Mulitple models
+              DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
+                DO dof_idx=1,N
+                  model_idx=MODELS_DATA(dof_idx)
+                  IF(model_idx.GT.0) THEN
+                    MODEL=>CELLML%MODELS(model_idx)%PTR
+                    IF(ASSOCIATED(MODEL)) THEN
+                      NUMBER_STATES=MODEL%NUMBER_OF_STATE
+                      NUMBER_INTERMEDIATES=MODEL%NUMBER_OF_INTERMEDIATE
+                      NUMBER_PARAMETERS=MODEL%NUMBER_OF_PARAMETERS
+
+                      !Copy CellML data to temporary arrays
+                      DO state_idx=1,NUMBER_STATES
+                        STATES(state_idx)=STATE_DATA((dof_idx-1)*N+state_idx)
+                      ENDDO !state_idx
+                      DO parameter_idx=1,NUMBER_PARAMETERS
+                        PARAMETERS(parameter_idx)=PARAMETER_DATA((dof_idx-1)*N+parameter_idx)
+                      ENDDO !parameter_idx
+
+#ifdef WITH_CELLML
+                      ! y_n is given - evaluate f(t,y_n):
+                      CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT &
+                        & ,STATES,RATES,INTERMEDIATES,PARAMETERS)
+                      ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                      STATES_TEMP = STATES + TIME_INCREMENT * RATES
+                      ! evaluate f(t+dt,y_{temp}).
+                      CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT,STATES_TEMP, &
+                        & RATES_TEMP,INTERMEDIATES,PARAMETERS)
+                      ! compute y_{n+1}=y_n + dt/2*[f(t,y_n)+f(t+dt,y_{temp})]:
+                      STATES = STATES + TIME_INCREMENT * .5_DP * (RATES + RATES_TEMP)
+                      ! done.
+#else
+                      CALL FlagError("Must compile with WITH_CELLML ON to use CellML functionality.",ERR,ERROR,*999)
+#endif
+
+                      !Copy temporary data back to CellML arrays
+                      DO intermediate_idx=1,NUMBER_INTERMEDIATES
+                        INTERMEDIATE_DATA((dof_idx-1)*N+intermediate_idx)=INTERMEDIATES(intermediate_idx)
+                      ENDDO !intermediate_idx
+                      DO state_idx=1,NUMBER_STATES
+                        STATE_DATA((dof_idx-1)*N+state_idx)=STATES(state_idx)
+                      ENDDO !state_idx
+                    ELSE
+                      LOCAL_ERROR="CellML environment model is not associated for model index "// &
+                        & TRIM(NumberToVString(ONLY_ONE_MODEL_INDEX,"*",ERR,ERROR))//" belonging to dof index "// &
+                        & TRIM(NumberToVString(dof_idx,"*",ERR,ERROR))//"."
+                      CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+                    ENDIF
+                  ENDIF !model_idx
+                ENDDO !dof_idx
+              ENDDO !TIME_STEP
+            ELSE
+              !Only one model is used.
+              MODEL=>CELLML%MODELS(ONLY_ONE_MODEL_INDEX)%PTR
+              IF(ASSOCIATED(MODEL)) THEN
+                NUMBER_STATES=MODEL%NUMBER_OF_STATE
+                NUMBER_INTERMEDIATES=MODEL%NUMBER_OF_INTERMEDIATE
+                NUMBER_PARAMETERS=MODEL%NUMBER_OF_PARAMETERS
+                DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
+                  DO dof_idx=1,N
+                    model_idx=MODELS_DATA(dof_idx)
+                    IF(model_idx.GT.0) THEN
+                      !Copy CellML data to temporary arrays
+                       DO state_idx=1,NUMBER_STATES
+                        STATES(state_idx)=STATE_DATA((dof_idx-1)*N+state_idx)
+                      ENDDO !state_idx
+                      DO parameter_idx=1,NUMBER_PARAMETERS
+                        PARAMETERS(parameter_idx)=PARAMETER_DATA((dof_idx-1)*N+parameter_idx)
+                      ENDDO !parameter_idx
+
+#ifdef WITH_CELLML
+                      ! y_n is given - evaluate f(t,y_n):
+                      CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT &
+                        & ,STATES,RATES,INTERMEDIATES,PARAMETERS)
+                      ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                      STATES_TEMP = STATES + TIME_INCREMENT * RATES
+                      ! evaluate f(t+dt,y_{temp}).
+                      CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT,STATES_TEMP &
+                        & ,RATES_TEMP,INTERMEDIATES,PARAMETERS)
+                      ! compute y_{n+1}=y_n + dt/2*[f(t,y_n)+f(t+dt,y_{temp})]:
+                      STATES = STATES + TIME_INCREMENT * .5_DP * (RATES + RATES_TEMP)
+                      ! done.
+#else
+                      CALL FlagError("Must compile with WITH_CELLML ON to use CellML functionality.",ERR,ERROR,*999)
+#endif
+                      !Copy temporary data back to CellML arrays
+                      DO intermediate_idx=1,NUMBER_INTERMEDIATES
+                        INTERMEDIATE_DATA((dof_idx-1)*N+intermediate_idx)=INTERMEDIATES(intermediate_idx)
+                      ENDDO !intermediate_idx
+                      DO state_idx=1,NUMBER_STATES
+                        STATE_DATA((dof_idx-1)*N+state_idx)=STATES(state_idx)
+                      ENDDO !state_idx
+                    ENDIF !model_idx
+                  ENDDO !dof_idx
+                ENDDO !TIME_STEP
+              ELSE
+                LOCAL_ERROR="CellML environment model is not associated for model index "// &
+                  & TRIM(NumberToVString(ONLY_ONE_MODEL_INDEX,"*",ERR,ERROR))//"."
+                CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+              ENDIF
+            ENDIF
+          ELSE
+            !Dof components are continguous. Can pass data directly.
+            IF(ONLY_ONE_MODEL_INDEX==CELLML_MODELS_FIELD_NOT_CONSTANT) THEN
+              !Mulitple models
+              DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
+                DO dof_idx=1,N
+                  model_idx=MODELS_DATA(dof_idx)
+                  IF(model_idx==0) THEN
+                    ! Do nothing- empty model index specified
+                  ELSE IF(model_idx > 0 .AND. model_idx <= CELLML%NUMBER_OF_MODELS) THEN
+                    MODEL=>CELLML%MODELS(model_idx)%PTR
+                    IF(ASSOCIATED(MODEL)) THEN
+                      NUMBER_STATES=MODEL%NUMBER_OF_STATE
+                      NUMBER_INTERMEDIATES=MODEL%NUMBER_OF_INTERMEDIATE
+                      NUMBER_PARAMETERS=MODEL%NUMBER_OF_PARAMETERS
+
+#ifdef WITH_CELLML
+                      !Call RHS. Note some models might not have state, rates, intermediate or parameter data so call accordingly
+                      !to avoid referencing null pointers
+                      IF(NUMBER_STATES>0) THEN
+                        IF(NUMBER_INTERMEDIATES>0) THEN
+                          IF(NUMBER_PARAMETERS>0) THEN
+                            !We have states, intermediate and parameters for the model
+
+                            STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                            STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                            INTERMEDIATE_START_DOF=(dof_idx-1)*MAX_NUMBER_INTERMEDIATES+1
+                            INTERMEDIATE_END_DOF=INTERMEDIATE_START_DOF+NUMBER_INTERMEDIATES-1
+                            PARAMETER_START_DOF=(dof_idx-1)*MAX_NUMBER_PARAMETERS+1
+                            PARAMETER_END_DOF=PARAMETER_START_DOF+NUMBER_PARAMETERS-1
+                            ! y_n is given - evaluate f(t,y_n):
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
+                              & STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF: &
+                              & INTERMEDIATE_END_DOF),PARAMETER_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+                            ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                            STATES_TEMP = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + TIME_INCREMENT * RATES
+                            ! evaluate f(t+dt,y_{temp}).
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT, &
+                              & STATES_TEMP,RATES_TEMP,INTERMEDIATES,PARAMETER_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+                            ! compute y_{n+1} later. But compute INTERMEDIATES (that's some kind of alternative output of the RHS model..)
+                            INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF) =  &
+                              & (INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF) + INTERMEDIATES) * 0.5_DP
+                            ! not done, yet.
+                          ELSE
+                            !We do not have parameters in the model
+
+                            STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                            STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                            INTERMEDIATE_START_DOF=(dof_idx-1)*MAX_NUMBER_INTERMEDIATES+1
+                            INTERMEDIATE_END_DOF=INTERMEDIATE_START_DOF+NUMBER_INTERMEDIATES-1
+                            ! y_n is given - evaluate f(t,y_n):
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT &
+                              & ,STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES &
+                              & ,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF),PARAMETERS)
+                            ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                            STATES_TEMP = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + TIME_INCREMENT * RATES
+                            ! evaluate f(t+dt,y_{temp}).
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT, &
+                              & STATES_TEMP,RATES_TEMP,INTERMEDIATES,PARAMETERS)
+                            ! compute y_{n+1} later. But compute INTERMEDIATES (that's some kind of alternative output of the RHS model..)
+                            INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF) = &
+                              & (INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF) + INTERMEDIATES) * 0.5_DP
+                            ! not done, yet.
+                           ENDIF
+                        ELSE
+                          IF(NUMBER_PARAMETERS>0) THEN
+                            !We do not have intermediates in the model
+                            STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                            STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                            PARAMETER_START_DOF=(dof_idx-1)*MAX_NUMBER_PARAMETERS+1
+                            PARAMETER_END_DOF=PARAMETER_START_DOF+NUMBER_PARAMETERS-1
+                            ! y_n is given - evaluate f(t,y_n):
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT &
+                              & ,STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATES &
+                              & ,PARAMETER_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+                            ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                            STATES_TEMP = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + TIME_INCREMENT * RATES
+                            ! evaluate f(t+dt,y_{temp}).
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT &
+                              & ,STATES_TEMP,RATES_TEMP,INTERMEDIATES,PARAMETER_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+                            ! compute y_{n+1} later.
+                            ! not done, yet.
+                          ELSE
+                            !We do not have intermediates or parameters in the model
+                            STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                            STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                            ! y_n is given - evaluate f(t,y_n):
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT &
+                              & ,STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATES,PARAMETERS)
+                            ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                            STATES_TEMP = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + TIME_INCREMENT * RATES
+                            ! evaluate f(t+dt,y_{temp}).
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT, &
+                              & STATES_TEMP,RATES_TEMP,INTERMEDIATES,PARAMETERS)
+                            ! compute y_{n+1} later.
+                            ! not done, yet.
+                          ENDIF
+                        ENDIF
+                      ELSE
+                        CALL FlagError("Invalid CellML model for integration - there are no states.",ERR,ERROR,*999)
+                      ENDIF
+
+#else
+                      CALL FlagError("Must compile with WITH_CELLML ON to use CellML functionality.",ERR,ERROR,*999)
+#endif
+                      ! compute y_{n+1}=y_n + dt/2*[f(t,y_n)+f(t+dt,y_{temp})]:
+                      STATE_DATA(STATE_START_DOF:STATE_END_DOF) = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                        & TIME_INCREMENT * 0.5_DP * (RATES(1:NUMBER_STATES) + RATES_TEMP(1:NUMBER_STATES))
+                      ! done.
+                    ELSE
+                      LOCAL_ERROR="CellML environment model is not associated for model index "// &
+                        & TRIM(NumberToVString(ONLY_ONE_MODEL_INDEX,"*",ERR,ERROR))//" belonging to dof index "// &
+                        & TRIM(NumberToVString(dof_idx,"*",ERR,ERROR))//"."
+                      CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+                    ENDIF
+                  ELSE
+                    LOCAL_ERROR="Invalid CellML model index: "// &
+                      & TRIM(NumberToVString(model_idx,"*",ERR,ERROR))//". The specified index should be between 1 and "// &
+                      & TRIM(NumberToVString(CELLML%NUMBER_OF_MODELS,"*",ERR,ERROR))//"."
+                    CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+                  ENDIF
+                ENDDO !dof_idx
+              ENDDO !TIME_STEP
+            ELSE
+              !Only one model is used.
+              MODEL=>CELLML%MODELS(ONLY_ONE_MODEL_INDEX)%PTR
+              IF(ASSOCIATED(MODEL)) THEN
+                NUMBER_STATES=MODEL%NUMBER_OF_STATE
+                NUMBER_INTERMEDIATES=MODEL%NUMBER_OF_INTERMEDIATE
+                NUMBER_PARAMETERS=MODEL%NUMBER_OF_PARAMETERS
+#ifdef WITH_CELLML
+
+                !Call RHS. Note some models might not have state, rates, intermediate or parameter data so call accordingly
+                !to avoid referencing null pointers
+                IF(NUMBER_STATES>0) THEN
+                  IF(NUMBER_INTERMEDIATES>0) THEN
+                    IF(NUMBER_PARAMETERS>0) THEN
+                      !We have states, intermediates and parameters for the model
+                      DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
+                        DO dof_idx=1,N
+                          model_idx=MODELS_DATA(dof_idx)
+                          IF(model_idx.GT.0) THEN
+
+                            STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                            STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                            INTERMEDIATE_START_DOF=(dof_idx-1)*MAX_NUMBER_INTERMEDIATES+1
+                            INTERMEDIATE_END_DOF=INTERMEDIATE_START_DOF+NUMBER_INTERMEDIATES-1
+                            PARAMETER_START_DOF=(dof_idx-1)*MAX_NUMBER_PARAMETERS+1
+                            PARAMETER_END_DOF=PARAMETER_START_DOF+NUMBER_PARAMETERS-1
+
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_START('cellml call rhs')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStart('cellml call rhs')
+!#endif
+                            ! y_n is given - evaluate f(t,y_n):
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
+                              & STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF: &
+                              & INTERMEDIATE_END_DOF),PARAMETER_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+                            
+
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStop('cellml call rhs')
+!#endif
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_STOP('cellml call rhs')
+#endif
+                            IF(DEBUG_MODE_A) THEN
+                              DO model_idx=1,NUMBER_STATES
+                                IF(ISNAN(RATES(model_idx))) THEN
+                                  WRITE(*,*) "Detected NAN at (1)!"
+                                  GO TO 999
+                                ENDIF
+                              ENDDO
+                              model_idx=MODELS_DATA(1)      
+                            ENDIF
+                            ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                            STATES_TEMP(1:NUMBER_STATES) = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                                                         & TIME_INCREMENT * RATES(1:NUMBER_STATES)  
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_START('cellml call rhs')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStart('cellml call rhs')
+!#endif
+                            ! evaluate f(t+dt,y_{temp}).
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT, &
+                              & STATES_TEMP(1:NUMBER_STATES),RATES_TEMP(1:NUMBER_STATES),INTERMEDIATES(1: &
+                              & MAX_NUMBER_INTERMEDIATES),PARAMETER_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStop('cellml call rhs')
+!#endif
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_STOP('cellml call rhs')
+#endif
+                            IF(DEBUG_MODE_A) THEN
+                              DO model_idx=1,NUMBER_STATES
+                                IF(ISNAN(RATES_TEMP(model_idx))) THEN
+                                  WRITE(*,*) "Detected NAN at (2)!"
+                                  GO TO 999
+                                ENDIF
+                              ENDDO
+                              model_idx=MODELS_DATA(1)      
+                            ENDIF
+                            ! compute y_{n+1}=y_n + dt/2*[f(t,y_n)+f(t+dt,y_{temp})]:
+                            STATE_DATA(STATE_START_DOF:STATE_END_DOF)=STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                              & TIME_INCREMENT * .5_DP * (RATES(1:NUMBER_STATES) + RATES_TEMP(1:NUMBER_STATES))
+                            ! compute INTERMEDIATES (that's some kind of alternative output of the RHS model..)
+                            INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF) = &
+                              & 0.5_DP * (INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF) &
+                                        & + INTERMEDIATES(1:MAX_NUMBER_INTERMEDIATES))
+                            ! done.
+                          ENDIF !model_idx  
+                          ! produce some output to see state evolution after each meso time step size (1D model time step size)
+                          IF(dof_idx == 1 .AND. DEBUG_MODE_A) THEN
+                            WRITE(*,*)'A=====================================',START_TIME + TIME_STEP*TIME_INCREMENT, '========'
+                           !WRITE(*,*) 'Stepping forward by',TIME_INCREMENT,'time instances. State afterwards:'
+                            DO model_idx=0,NUMBER_STATES-1
+                              WRITE(*,*) STATE_DATA(STATE_START_DOF+model_idx)
+                            ENDDO
+                            model_idx=MODELS_DATA(1)
+                            WRITE(*,*) ''
+                          ENDIF
+                        ENDDO !dof_idx
+                      ENDDO !TIME_STEP
+                    
+                    ELSE
+                      !We do not have parameters in the model
+                      DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
+                        DO dof_idx=1,N
+                          model_idx=MODELS_DATA(dof_idx)
+                          IF(model_idx.GT.0) THEN
+
+                            STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                            STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                            INTERMEDIATE_START_DOF=(dof_idx-1)*MAX_NUMBER_INTERMEDIATES+1
+                            INTERMEDIATE_END_DOF=INTERMEDIATE_START_DOF+NUMBER_INTERMEDIATES-1
+
+                            ! y_n is given - evaluate f(t,y_n):
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
+                              & STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATE_DATA(INTERMEDIATE_START_DOF: &
+                              & INTERMEDIATE_END_DOF),PARAMETERS)
+                            ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                            STATES_TEMP(1:NUMBER_STATES) = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                                                         & TIME_INCREMENT * RATES(1:NUMBER_STATES)
+                            ! evaluate f(t+dt,y_{temp}).  
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT, &
+                              & STATES_TEMP,RATES_TEMP,INTERMEDIATES,PARAMETERS)
+                            ! compute y_{n+1}=y_n + dt/2*[f(t,y_n)+f(t+dt,y_{temp})]:
+                            STATE_DATA(STATE_START_DOF:STATE_END_DOF) = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                              & TIME_INCREMENT * .5_DP * (RATES(1:NUMBER_STATES) + RATES_TEMP(1:NUMBER_STATES))
+                            ! compute INTERMEDIATES (that's some kind of alternative output of the RHS model..)
+                            INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF) = &
+                              & 0.5_DP * (INTERMEDIATE_DATA(INTERMEDIATE_START_DOF:INTERMEDIATE_END_DOF) + INTERMEDIATES)
+                            ! done.
+                          ENDIF !model_idx
+                        ENDDO !dof_idx
+                      ENDDO !TIME_STEP
+                    ENDIF
+                  ELSE
+                  !We do not have intermediates in the model
+                    IF(NUMBER_PARAMETERS>0) THEN
+                      DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
+                        DO dof_idx=1,N
+                          model_idx=MODELS_DATA(dof_idx)
+                          IF(model_idx.GT.0) THEN
+                            STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                            STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                            PARAMETER_START_DOF=(dof_idx-1)*MAX_NUMBER_PARAMETERS+1
+                            PARAMETER_END_DOF=PARAMETER_START_DOF+NUMBER_PARAMETERS-1
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_START('cellml call rhs')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStart('cellml call rhs')
+!#endif
+                            ! y_n is given - evaluate f(t,y_n):
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
+                              & STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATES, &
+                              & PARAMETER_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStop('cellml call rhs')
+!#endif
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_STOP('cellml call rhs')
+#endif
+                            ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                            STATES_TEMP(1:NUMBER_STATES) = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                                                         & TIME_INCREMENT * RATES(1:NUMBER_STATES)
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_START('cellml call rhs')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStart('cellml call rhs')
+!#endif
+                            ! evaluate f(t+dt,y_{temp}).
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT, &
+                              & STATES_TEMP,RATES_TEMP,INTERMEDIATES,PARAMETER_DATA(PARAMETER_START_DOF:PARAMETER_END_DOF))
+                                                         
+!#ifdef USE_CUSTOM_PROFILING
+!                            CALL CustomProfilingStop('cellml call rhs')
+!#endif
+#ifdef TAUPROF
+                            CALL TAU_STATIC_PHASE_STOP('cellml call rhs')
+#endif
+                            ! compute y_{n+1}=y_n + dt/2*[f(t,y_n)+f(t+dt,y_{temp})]:
+                            STATE_DATA(STATE_START_DOF:STATE_END_DOF)=STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                              & TIME_INCREMENT * .5_DP * (RATES(1:NUMBER_STATES) + RATES_TEMP(1:NUMBER_STATES))
+                            ! done.
+                          ENDIF !model_idx
+                          
+                          ! produce some output to see state evolution after each meso time step size (1D model time step size)
+                          IF(dof_idx == 1 .AND. DEBUG_MODE_A) THEN
+                            WRITE(*,*)'B=====================================',START_TIME + TIME_STEP*TIME_INCREMENT, '========'
+                            DO model_idx=0,NUMBER_STATES-1
+                              WRITE(*,*) STATE_DATA(STATE_START_DOF+model_idx)
+                            ENDDO
+                            model_idx=MODELS_DATA(1)
+                          ENDIF
+                          
+                        ENDDO !dof_idx
+                      ENDDO !TIME_STEP
+                    ELSE
+                      !We do not have intermediates or parameters in the model
+                      DO TIME_STEP=1,TS_NUMBER ! to go from t_n to t_{n+1} (first step: from t_0 to t_1)
+                        DO dof_idx=1,N
+                          model_idx=MODELS_DATA(dof_idx)
+                          IF(model_idx.GT.0) THEN
+
+                            STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                            STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                            ! y_n is given - evaluate f(t,y_n):
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + (TIME_STEP-1)*TIME_INCREMENT, &
+                              & STATE_DATA(STATE_START_DOF:STATE_END_DOF),RATES,INTERMEDIATES,PARAMETERS)
+                            ! compute y_{temp} = y_n + dt*f(t,y_n) 
+                            STATES_TEMP(1:NUMBER_STATES) = STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                                                         & TIME_INCREMENT * RATES(1:NUMBER_STATES)
+                            ! evaluate f(t+dt,y_{temp}).
+                            CALL CELLML_MODEL_DEFINITION_CALL_RHS_ROUTINE(MODEL%PTR,START_TIME + TIME_STEP*TIME_INCREMENT, &
+                              & STATES_TEMP,RATES_TEMP,INTERMEDIATES,PARAMETERS)
+                            ! compute y_{n+1}=y_n + dt/2*[f(t,y_n)+f(t+dt,y_{temp})]:
+                            STATE_DATA(STATE_START_DOF:STATE_END_DOF)=STATE_DATA(STATE_START_DOF:STATE_END_DOF) + &
+                              & TIME_INCREMENT * .5_DP * (RATES(1:NUMBER_STATES) + RATES_TEMP(1:NUMBER_STATES))
+                            ! done.
+                          ENDIF !model_idx
+                        ENDDO !dof_idx
+                      ENDDO !TIME_STEP
+                    ENDIF
+                  ENDIF
+                ELSE
+                  CALL FlagError("Invalid CellML model for integration - there are no states.",ERR,ERROR,*999)
+                ENDIF
+
+#else
+                CALL FlagError("Must compile with WITH_CELLML ON to use CellML functionality.",ERR,ERROR,*999)
+#endif
+
+              ELSE
+                LOCAL_ERROR="CellML environment model is not associated for model index "// &
+                  & TRIM(NumberToVString(ONLY_ONE_MODEL_INDEX,"*",ERR,ERROR))//"."
+                CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+              ENDIF
+            ENDIF
+          ENDIF
+        ELSE
+          CALL FlagError("CellML environment models field is not associated.",ERR,ERROR,*999)
+        ENDIF
+      ELSE
+        CALL FlagError("CellML environment is not associated.",ERR,ERROR,*999)
+      ENDIF
+    ELSE
+      CALL FlagError("Improved Euler solver is not associated.",ERR,ERROR,*999)
+    ENDIF
+
+    EXITS("SOLVER_DAE_EULER_IMPROVED_INTEGRATE")
+    RETURN
+999 ERRORSEXITS("SOLVER_DAE_EULER_IMPROVED_INTEGRATE",ERR,ERROR)
+    RETURN 1
+
+  END SUBROUTINE SOLVER_DAE_EULER_IMPROVED_INTEGRATE
+  
+  !
+  !================================================================================================================================
+  !
+
+  !>Set the number of time steps to use for a improved Euler solver
+  SUBROUTINE SOLVER_DAE_EULER_IMPROVED_SET_NSTEPS(DAE_SOLVER,NUMBER_OF_STEPS,ERR,ERROR,*)
+  
+    !Argument variables
+    TYPE(DAE_SOLVER_TYPE), POINTER :: DAE_SOLVER !<A pointer to the differential-algebraic equation solver of which the number of time steps shall be set
+    INTEGER(INTG) :: NUMBER_OF_STEPS !< The number to set TIME_STEPS_NUMBER to
     INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
     TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
     !Local Variables
+    
+    ENTERS("SOLVER_DAE_EULER_IMPROVED_SET_NSTEPS",ERR,ERROR,*999)
+
+    IF(ASSOCIATED(DAE_SOLVER)) THEN
+      IF(ASSOCIATED(DAE_SOLVER%EULER_SOLVER)) THEN
+        IF(ASSOCIATED(DAE_SOLVER%EULER_SOLVER%IMPROVED_EULER_SOLVER)) THEN
+          IF(NUMBER_OF_STEPS > 0) THEN
+            DAE_SOLVER%EULER_SOLVER%IMPROVED_EULER_SOLVER%TIME_STEPS_NUMBER=NUMBER_OF_STEPS
+          ELSE
+            CALL FlagError("Invalid INTEGER value: NUMBER_OF_STEPS must be > 0.",ERR,ERROR,*999)
+          ENDIF
+        ELSE
+          CALL FlagError("Improved Euler solver is not associated.",ERR,ERROR,*999)
+        ENDIF
+      ELSE
+        CALL FlagError("Euler solver is not associated.",ERR,ERROR,*999)
+      ENDIF
+    ELSE
+      CALL FlagError("Differential-algebraic equation solver is not associated.",ERR,ERROR,*999)
+    ENDIF
+
+    EXITS("SOLVER_DAE_EULER_IMPROVED_SET_NSTEPS")
+    RETURN
+999 ERRORSEXITS("SOLVER_DAE_EULER_IMPROVED_SET_NSTEPS",ERR,ERROR)
+    RETURN 1
+
+  END SUBROUTINE SOLVER_DAE_EULER_IMPROVED_SET_NSTEPS 
+
+  !
+  !================================================================================================================================
+  !
+
+  !>Solve using an improved Euler differential-algebraic equation solver (Heun's method).
+  SUBROUTINE SOLVER_DAE_EULER_IMPROVED_SOLVE(IMPROVED_EULER_SOLVER,ERR,ERROR,*)
+  
+    !Argument variables
+    TYPE(IMPROVED_EULER_DAE_SOLVER_TYPE), POINTER :: IMPROVED_EULER_SOLVER !<A pointer to the improved Euler differential-algebraic equation solver to solve
+    INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
+    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
+    
+    !Local Variables
+    INTEGER(INTG) :: cellml_idx
+    INTEGER(INTG), POINTER :: MODELS_DATA(:)
+    REAL(DP), POINTER :: INTERMEDIATE_DATA(:),PARAMETER_DATA(:),STATE_DATA(:)
+    TYPE(CELLML_TYPE), POINTER :: CELLML_ENVIRONMENT
+    TYPE(CELLML_EQUATIONS_TYPE), POINTER :: CELLML_EQUATIONS
+    TYPE(CELLML_MODELS_FIELD_TYPE), POINTER :: CELLML_MODELS_FIELD
+    TYPE(DAE_SOLVER_TYPE), POINTER :: DAE_SOLVER
+    TYPE(EULER_DAE_SOLVER_TYPE), POINTER :: EULER_SOLVER
+    TYPE(FIELD_VARIABLE_TYPE), POINTER :: MODELS_VARIABLE
+    TYPE(FIELD_TYPE), POINTER :: MODELS_FIELD,STATE_FIELD,PARAMETERS_FIELD,INTERMEDIATE_FIELD
+    TYPE(SOLVER_TYPE), POINTER :: SOLVER
+    TYPE(VARYING_STRING) :: LOCAL_ERROR
 
     ENTERS("SOLVER_DAE_EULER_IMPROVED_SOLVE",ERR,ERROR,*999)
 
+    NULLIFY(MODELS_DATA)
+    NULLIFY(INTERMEDIATE_DATA)
+    NULLIFY(PARAMETER_DATA)
+    NULLIFY(STATE_DATA)
+    NULLIFY(MODELS_VARIABLE)
+    NULLIFY(MODELS_FIELD)
+    NULLIFY(STATE_FIELD)
+    NULLIFY(PARAMETERS_FIELD)
+    NULLIFY(INTERMEDIATE_FIELD)
+    
     IF(ASSOCIATED(IMPROVED_EULER_SOLVER)) THEN
-      CALL FlagError("Not implemented.",ERR,ERROR,*999)
-    ELSE
-      CALL FlagError("Improved Euler differential-algebraic equation solver is not associated.",ERR,ERROR,*999)
-    ENDIF
+      EULER_SOLVER=>IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER
+      IF(ASSOCIATED(EULER_SOLVER)) THEN
+        DAE_SOLVER=>EULER_SOLVER%DAE_SOLVER
+        IF(ASSOCIATED(DAE_SOLVER)) THEN
+          SOLVER=>DAE_SOLVER%SOLVER
+          IF(ASSOCIATED(SOLVER)) THEN
+            CELLML_EQUATIONS=>SOLVER%CELLML_EQUATIONS
+            IF(ASSOCIATED(CELLML_EQUATIONS)) THEN
+              DO cellml_idx=1,CELLML_EQUATIONS%NUMBER_OF_CELLML_ENVIRONMENTS
+                CELLML_ENVIRONMENT=>CELLML_EQUATIONS%CELLML_ENVIRONMENTS(cellml_idx)%PTR
+                IF(ASSOCIATED(CELLML_ENVIRONMENT)) THEN
+                  CELLML_MODELS_FIELD=>CELLML_ENVIRONMENT%MODELS_FIELD
+                  IF(ASSOCIATED(CELLML_MODELS_FIELD)) THEN
+                    MODELS_FIELD=>CELLML_MODELS_FIELD%MODELS_FIELD
+                    IF(ASSOCIATED(MODELS_FIELD)) THEN
 
+!!TODO: Maybe move this getting of fields earlier up the DAE solver chain? For now keep here.
+
+                    !Make sure CellML fields have been updated to the current value of any mapped fields
+
+#ifdef TAUPROF
+                      CALL TAU_STATIC_PHASE_START('1.1.1. cellml field2cellml update')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.1. cellml field2cellml update')
+!#endif
+
+                      CALL CELLML_FIELD_TO_CELLML_UPDATE(CELLML_ENVIRONMENT,ERR,ERROR,*999)
+
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.1. cellml field2cellml update')
+!#endif
+#ifdef TAUPROF
+                      CALL TAU_STATIC_PHASE_STOP('1.1.1. cellml field2cellml update')
+                      CALL TAU_STATIC_PHASE_START('1.1.2. cellml field var get')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.2. cellml field var get')
+!#endif
+
+                      CALL FIELD_VARIABLE_GET(MODELS_FIELD,FIELD_U_VARIABLE_TYPE,MODELS_VARIABLE,ERR,ERROR,*999)
+
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.2. cellml field var get')
+!#endif
+#ifdef TAUPROF
+                      CALL TAU_STATIC_PHASE_STOP('1.1.2. cellml field var get')
+                      CALL TAU_STATIC_PHASE_START('1.1.3. cellml data get')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.3. cellml data get')
+!#endif
+
+                      CALL FIELD_PARAMETER_SET_DATA_GET(MODELS_FIELD,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
+                        & MODELS_DATA,ERR,ERROR,*999)
+
+                      !Get the state information if this environment has any.
+                      IF(ASSOCIATED(CELLML_ENVIRONMENT%STATE_FIELD)) THEN
+                        STATE_FIELD=>CELLML_ENVIRONMENT%STATE_FIELD%STATE_FIELD
+                        IF(ASSOCIATED(STATE_FIELD)) THEN
+                          CALL FIELD_PARAMETER_SET_DATA_GET(STATE_FIELD,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
+                            & STATE_DATA,ERR,ERROR,*999)
+                        ENDIF
+                      ENDIF
+
+                      !Get the parameters information if this environment has any.
+                      IF(ASSOCIATED(CELLML_ENVIRONMENT%PARAMETERS_FIELD)) THEN
+                        PARAMETERS_FIELD=>CELLML_ENVIRONMENT%PARAMETERS_FIELD%PARAMETERS_FIELD
+                        IF(ASSOCIATED(PARAMETERS_FIELD)) THEN
+                          CALL FIELD_PARAMETER_SET_DATA_GET(PARAMETERS_FIELD,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
+                            & PARAMETER_DATA,ERR,ERROR,*999)
+                        ENDIF
+                      ENDIF
+
+                      !Get the intermediate information if this environment has any.
+                      IF(ASSOCIATED(CELLML_ENVIRONMENT%INTERMEDIATE_FIELD)) THEN
+                        INTERMEDIATE_FIELD=>CELLML_ENVIRONMENT%INTERMEDIATE_FIELD%INTERMEDIATE_FIELD
+                        IF(ASSOCIATED(INTERMEDIATE_FIELD)) THEN
+                          CALL FIELD_PARAMETER_SET_DATA_GET(INTERMEDIATE_FIELD,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
+                            & INTERMEDIATE_DATA,ERR,ERROR,*999)
+                        ENDIF
+                      ENDIF
+ 
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.3. cellml data get')
+!#endif
+#ifdef TAUPROF
+                      CALL TAU_STATIC_PHASE_STOP('1.1.3. cellml data get')
+                      CALL TAU_STATIC_PHASE_START('1.1.4. cellml integrate')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.4. cellml integrate')
+!#endif
+
+                      !Integrate these CellML equations
+                      CALL SOLVER_DAE_EULER_IMPROVED_INTEGRATE(IMPROVED_EULER_SOLVER,CELLML_ENVIRONMENT,MODELS_VARIABLE% &
+                        & TOTAL_NUMBER_OF_DOFS,DAE_SOLVER%START_TIME,DAE_SOLVER%END_TIME,DAE_SOLVER%INITIAL_STEP, &
+                        & CELLML_ENVIRONMENT%MODELS_FIELD%ONLY_ONE_MODEL_INDEX,MODELS_DATA,CELLML_ENVIRONMENT% &
+                        & MAXIMUM_NUMBER_OF_STATE,STATE_DATA,CELLML_ENVIRONMENT%MAXIMUM_NUMBER_OF_PARAMETERS, &
+                        & PARAMETER_DATA,CELLML_ENVIRONMENT%MAXIMUM_NUMBER_OF_INTERMEDIATE,INTERMEDIATE_DATA,ERR,ERROR,*999)
+
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.4. cellml integrate')
+!#endif
+#ifdef TAUPROF
+                      CALL TAU_STATIC_PHASE_STOP('1.1.4. cellml integrate')
+                      CALL TAU_STATIC_PHASE_START('1.1.5. cellml data restore')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.5. cellml data restore')
+!#endif
+
+                      !Restore field data
+                      CALL FIELD_PARAMETER_SET_DATA_RESTORE(MODELS_FIELD,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
+                        & MODELS_DATA,ERR,ERROR,*999)
+                      IF(ASSOCIATED(STATE_FIELD)) CALL FIELD_PARAMETER_SET_DATA_RESTORE(STATE_FIELD,FIELD_U_VARIABLE_TYPE, &
+                        & FIELD_VALUES_SET_TYPE,STATE_DATA,ERR,ERROR,*999)
+                      IF(ASSOCIATED(PARAMETERS_FIELD)) CALL FIELD_PARAMETER_SET_DATA_RESTORE(PARAMETERS_FIELD, &
+                        & FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,PARAMETER_DATA,ERR,ERROR,*999)
+                      IF(ASSOCIATED(INTERMEDIATE_FIELD)) CALL FIELD_PARAMETER_SET_DATA_RESTORE(INTERMEDIATE_FIELD, &
+                        & FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,INTERMEDIATE_DATA,ERR,ERROR,*999)
+
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.5. cellml data restore')
+!#endif
+#ifdef TAUPROF
+                      CALL TAU_STATIC_PHASE_STOP('1.1.5. cellml data restore')
+                      CALL TAU_STATIC_PHASE_START('1.1.6. cellml field update')
+#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStart('1.1.6. cellml field update')
+!#endif
+
+                    !Make sure fields have been updated to the current value of any mapped CellML fields
+                      CALL CELLML_CELLML_TO_FIELD_UPDATE(CELLML_ENVIRONMENT,ERR,ERROR,*999)
+
+!#ifdef USE_CUSTOM_PROFILING
+!                      CALL CustomProfilingStop('1.1.6. cellml field update')
+!#endif
+#ifdef TAUPROF
+                      CALL TAU_STATIC_PHASE_STOP('1.1.6. cellml field update')
+#endif
+
+                    ELSE
+                      LOCAL_ERROR="The models field is not associated for CellML index "// &
+                        & TRIM(NumberToVString(cellml_idx,"*",ERR,ERROR))//"."
+                      CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+                    ENDIF
+                  ELSE
+                    LOCAL_ERROR="The CellML models field is not associated for CellML index "// &
+                      & TRIM(NumberToVString(cellml_idx,"*",ERR,ERROR))//"."
+                    CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+                  ENDIF
+                ELSE
+                  LOCAL_ERROR="The CellML enviroment is not associated for for CellML index "// &
+                    & TRIM(NumberToVString(cellml_idx,"*",ERR,ERROR))//"."
+                  CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+                ENDIF
+              ENDDO !cellml_idx
+            ELSE
+              CALL FlagError("CellML equations is not associated.",ERR,ERROR,*999)
+            ENDIF
+          ELSE
+            CALL FlagError("The solver is not associated.",ERR,ERROR,*999)
+          ENDIF
+        ELSE
+          CALL FlagError("The Differential-algebraic equation solver is not associated.",ERR,ERROR,*999)
+        ENDIF
+      ELSE
+        CALL FlagError("Euler differential-algebraic equation solver is not associated.",ERR,ERROR,*999)
+      ENDIF
+    ELSE
+      CALL FlagError("Improved Euler DAE solver is not associated.",ERR,ERROR,*999)
+    ENDIF
+    
     EXITS("SOLVER_DAE_EULER_IMPROVED_SOLVE")
     RETURN
 999 ERRORSEXITS("SOLVER_DAE_EULER_IMPROVED_SOLVE",ERR,ERROR)
@@ -3001,7 +3799,7 @@ CONTAINS
         IF(ASSOCIATED(FORWARD_EULER_DAE_SOLVER)) THEN
           SELECT CASE(SOLVER_LIBRARY_TYPE)
           CASE(SOLVER_CMISS_LIBRARY)
-            CALL FlagError("Not implemented.",ERR,ERROR,*999)
+            FORWARD_EULER_DAE_SOLVER%SOLVER_LIBRARY=SOLVER_LIBRARY_TYPE
           CASE(SOLVER_PETSC_LIBRARY)
             CALL FlagError("Not implemented.",ERR,ERROR,*999)
           CASE DEFAULT
@@ -3033,7 +3831,7 @@ CONTAINS
         IF(ASSOCIATED(IMPROVED_EULER_DAE_SOLVER)) THEN
           SELECT CASE(SOLVER_LIBRARY_TYPE)
           CASE(SOLVER_CMISS_LIBRARY)
-            CALL FlagError("Not implemented.",ERR,ERROR,*999)
+            IMPROVED_EULER_DAE_SOLVER%SOLVER_LIBRARY=SOLVER_LIBRARY_TYPE
           CASE(SOLVER_PETSC_LIBRARY)
             CALL FlagError("Not implemented.",ERR,ERROR,*999)
           CASE DEFAULT
@@ -3489,7 +4287,7 @@ CONTAINS
             IF(ASSOCIATED(IMPROVED_EULER_DAE_SOLVER)) THEN
               SELECT CASE(SOLVER_LIBRARY_TYPE)
               CASE(SOLVER_CMISS_LIBRARY)
-                CALL FlagError("Not implemented.",ERR,ERROR,*999)
+                IMPROVED_EULER_DAE_SOLVER%SOLVER_LIBRARY=SOLVER_CMISS_LIBRARY
               CASE(SOLVER_PETSC_LIBRARY)
                 CALL FlagError("Not implemented.",ERR,ERROR,*999)
               CASE DEFAULT
@@ -3564,7 +4362,6 @@ CONTAINS
             CALL FlagError("Not implemented.",ERR,ERROR,*999)
           CASE(SOLVER_PETSC_LIBRARY)
             BDF_DAE_SOLVER%SOLVER_LIBRARY = SOLVER_PETSC_LIBRARY
-            ! WRITE(*,*) 'SOLVER_DAE_LIBRARY_TYPE_SET, solver_routines, ~3565: petsc library is set. BDF_DAE_SOLVER ready for setup'
           CASE DEFAULT
             LOCAL_ERROR="The solver library type of "//TRIM(NumberToVString(SOLVER_LIBRARY_TYPE,"*",ERR,ERROR))// &
               & " is invalid."
@@ -3735,13 +4532,13 @@ CONTAINS
   !================================================================================================================================
   !
 
-  !(>)Finalise a GL differential-algebraic equation solver and deallocate all memory.
+  !>Finalise a GL differential-algebraic equation solver and deallocate all memory.
   SUBROUTINE SOLVER_DAE_GL_FINALISE(GL_SOLVER,ERR,ERROR,*)
 
     !Argument variables
-    TYPE(GL_DAE_SOLVER_TYPE), POINTER :: GL_SOLVER !(<)A pointer the GL differential-algebraic equation solver to finalise
-    INTEGER(INTG), INTENT(OUT) :: ERR !(<)The error code
-    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !(<)The error string
+    TYPE(GL_DAE_SOLVER_TYPE), POINTER :: GL_SOLVER !<A pointer the GL differential-algebraic equation solver to finalise
+    INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
+    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
     !Local Variables
 
     ENTERS("SOLVER_DAE_GL_FINALISE",ERR,ERROR,*999)
@@ -3761,13 +4558,13 @@ CONTAINS
   !================================================================================================================================
   !
 
-  !(>)Initialise a GL solver for a differential-algebraic equation solver
+  !>Initialise a GL solver for a differential-algebraic equation solver
   SUBROUTINE SOLVER_DAE_GL_INITIALISE(DAE_SOLVER,ERR,ERROR,*)
 
     !Argument variables
-    TYPE(DAE_SOLVER_TYPE), POINTER :: DAE_SOLVER !(<)A pointer the differential-algebraic equation solver to initialise a GL solver for
-    INTEGER(INTG), INTENT(OUT) :: ERR !(<)The error code
-    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !(<)The error string
+    TYPE(DAE_SOLVER_TYPE), POINTER :: DAE_SOLVER !<A pointer the differential-algebraic equation solver to initialise a GL solver for
+    INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
+    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
     !Local Variables
     INTEGER(INTG) :: DUMMY_ERR
     TYPE(VARYING_STRING) :: DUMMY_ERROR
@@ -4138,249 +4935,6 @@ CONTAINS
     RETURN 1
 
   END SUBROUTINE SOLVER_DAE_BDF_INTEGRATE
- 
-  !
-  !================================================================================================================================
-  !
-  !(>)Integrate using a GL differential-algebraic equation solver.
-
-SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_INCREMENT, &
-    & ONLY_ONE_MODEL_INDEX,MODELS_DATA,MAX_NUMBER_STATES,STATE_DATA,MAX_NUMBER_PARAMETERS,PARAMETERS_DATA, &
-    & MAX_NUMBER_INTERMEDIATES,INTERMEDIATE_DATA,ERR,ERROR,*)
-
-    !Argument variables
-    TYPE(GL_DAE_SOLVER_TYPE), POINTER :: GL_SOLVER !(<)A pointer the GL differential-algebraic equation solver to integrate
-    TYPE(CELLML_TYPE), POINTER :: CELLML !(<)A pointer to the CellML environment to integrate the equations for.
-    INTEGER(INTG), INTENT(IN) :: N !(<)The number of degrees-of-freedom
-    REAL(DP), INTENT(IN) :: START_TIME !(<)The start time for the integration
-    REAL(DP), INTENT(IN) :: END_TIME !(<)The end time for the integration
-    REAL(DP), INTENT(INOUT) :: TIME_INCREMENT !(<)The (initial) time increment for the integration
-    INTEGER(INTG), INTENT(IN) :: ONLY_ONE_MODEL_INDEX !(<)If only one model is used in the models data the index of that model. 0 otherwise.
-    INTEGER(INTG), POINTER, INTENT(IN) :: MODELS_DATA(:) !(<)MODELS_DATA(dof_idx). The models data for the dof_idx'th dof.
-    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_STATES !(<)The maximum number of state variables per dof
-    REAL(DP), POINTER, INTENT (INOUT) :: STATE_DATA(:) !(<)STATE_DATA(state_idx,dof_idx). The state data for the state_idx'th state variable of the dof_idx'th dof. state_idx varies from 1..NUMBER_STATES.
-    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_PARAMETERS !(<)The maximum number of parameter variables per dof.
-    REAL(DP), POINTER, INTENT(INOUT) :: PARAMETERS_DATA(:) !(<)PARAMETERS_DATA(parameter_idx,dof_idx). The parameters data for the parameter_idx'th parameter variable of the dof_idx'th dof. parameter_idx varies from 1..NUMBER_PARAMETERS.
-    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_INTERMEDIATES !(<)The maximum number of intermediate variables per dof.
-    REAL(DP), POINTER, INTENT(INOUT) :: INTERMEDIATE_DATA(:) !(<)INTERMEDIATE_DATA(intermediate_idx,dof_idx). The intermediate values data for the intermediate_idx'th intermediate variable of the dof_idx'th dof. intermediate_idx varies from 1.NUMBER_INTERMEDIATE
-    INTEGER(INTG), INTENT(OUT) :: ERR !(<)The error code
-    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !(<)The error string
-    !Local Variables
-    TYPE(PetscTSType) :: ts !(<)The PETSc TS type
-    INTEGER(INTG) :: NUMBER_OF_STEPS !<The number of steps the GL DAE solver needed to compute the next state. This is problem dependent, since PETSc will choose step sizes dynamically. 
-    REAL(DP) :: FINALSOLVEDTIME
-    TYPE(PetscVecType) :: PETSC_CURRENT_STATES !(<)The initial and final states for the DAE
-    TYPE(CellMLPETScContextType), POINTER :: CTX !(<)The passed through context
-    INTEGER(INTG) :: dof_idx,DOF_ORDER_TYPE,model_idx, NUMBER_STATES,STATE_END_DOF,state_idx,STATE_START_DOF,array_idx
-    REAL(DP), ALLOCATABLE  :: STATES_TEMP(:),RATES_TEMP(:)
-    INTEGER(INTG), ALLOCATABLE :: ARRAY_INDICES(:)
-    TYPE(CELLML_MODEL_TYPE), POINTER :: MODEL
-    TYPE(VARYING_STRING) :: LOCAL_ERROR
-    TYPE(PetscVecType) :: PETSC_RATES
-    EXTERNAL :: Problem_SolverDAECellMLRHSPetsc
-
-
-    ENTERS("SOLVER_DAE_GL_INTEGRATE",ERR,ERROR,*999)
-
-    NULLIFY(CTX)
-    IF(ASSOCIATED(GL_SOLVER)) THEN
-      IF(ASSOCIATED(CELLML)) THEN
-        IF(ASSOCIATED(CELLML%MODELS_FIELD)) THEN
-          SELECT CASE(GL_SOLVER%SOLVER_LIBRARY)
-          CASE(SOLVER_PETSC_LIBRARY)
-            CALL FIELD_DOF_ORDER_TYPE_GET(CELLML%MODELS_FIELD%MODELS_FIELD, &
-              & FIELD_U_VARIABLE_TYPE,DOF_ORDER_TYPE,ERR,ERROR,*999)
-            IF(DOF_ORDER_TYPE==FIELD_SEPARATED_COMPONENT_DOF_ORDER) THEN
-
-            ELSE !dof component order is contiguous
-              IF(ONLY_ONE_MODEL_INDEX==CELLML_MODELS_FIELD_NOT_CONSTANT) THEN
-
-              ELSE !only one model
-                MODEL=>CELLML%MODELS(ONLY_ONE_MODEL_INDEX)%PTR
-                IF(ASSOCIATED(MODEL)) THEN
-                  !determine no. of states in model and allocate necessary arrays
-                  NUMBER_STATES = MODEL%NUMBER_OF_STATE
-                  ALLOCATE(STATES_TEMP(0:NUMBER_STATES-1),STAT=ERR)
-                  ALLOCATE(RATES_TEMP(0:NUMBER_STATES-1),STAT=ERR)
-                  ALLOCATE(ARRAY_INDICES(0:NUMBER_STATES-1),STAT=ERR)
-                  ARRAY_INDICES = (/(array_idx,array_idx=0,(NUMBER_STATES-1))/)
-
-
-                  !initialize context for petsc solving.
-                  CALL Solver_DAECellMLPETScContextInitialise(ctx,err,error,*999) 
-!                      ctx beinhaltet:  
-!                                       ctx%solver, - A pointer to the solver
-!                                       ctx%cellml, - A pointer to the CellML environment
-!                                       ctx%rates,  - the time derivative of the state
-!                                       ctx%dofIdx, - The DOF index of the cellml-petsc context
-
-                  DO dof_idx=1,N
-                    model_idx = MODELS_DATA(dof_idx)
-                    IF(model_idx>0) THEN !if model is assigned to dof
-                      !access the state field data
-                      STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
-                      STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
-                      DO state_idx=1,NUMBER_STATES
-                        STATES_TEMP(state_idx-1) = STATE_DATA(STATE_START_DOF+state_idx-1)
-                      ENDDO
-
-                      !+++++++create PETSC states vector to initialize solver+++++++++
-                      !Create a standard, sequential array-style vector:
-                      !Input: MPI-communicator, Vector length
-                      !OUTPUT: PETSC_CURRENT_STATES - the created vector.
-                      CALL Petsc_VecInitialise(PETSC_CURRENT_STATES,err,error,*999)
-                      CALL Petsc_VecCreateSeq(PETSC_COMM_SELF, &
-                        & NUMBER_STATES,PETSC_CURRENT_STATES,ERR,ERROR,*999)
-
-                      !would set the local and global sizes, and check to determine compatibility
-                      ! see: http://www.mcs.anl.gov/petsc/petsc-current/docs/manualpages/Vec/VecSetFromOptions.html
-                      !CALL Petsc_VecSetSizes(PETSC_CURRENT_STATES, &
-                      !  & PETSC_DECIDE,(NUMBER_STATES),ERR,ERROR,*999)
-
-                      !would configure the vector from the options database. Init as vec: 'PETSC_CURRENT_STATES'
-                      !CALL Petsc_VecSetFromOptions(PETSC_CURRENT_STATES,ERR,ERROR,*999)
-
-                      !create PETSC rates vector to return values from evaluating rhs routine (dx/dt=rhs)
-                      CALL Petsc_VecCreateSeq(PETSC_COMM_SELF, &
-                        & NUMBER_STATES,PETSC_RATES,ERR,ERROR,*999)
-                      !CALL Petsc_VecSetSizes(PETSC_RATES, &
-                      !  & PETSC_DECIDE,(NUMBER_STATES),ERR,ERROR,*999)
-                      !CALL Petsc_VecSetFromOptions(PETSC_RATES,ERR,ERROR,*999)
-
-                      !Set up PETSC TS context for GL solver
-                      CALL Petsc_TSCreate(PETSC_COMM_SELF,ts,ERR,ERROR,*999)
-
-                      CALL Petsc_TSSetProblemType(ts,PETSC_TS_NONLINEAR,ERR,ERROR,*999)
-!
-                      ! D I F F E R E N C E   T O   P E T S C   E X A M P L E S : 
-!
-!                     # TSSetRHSFunction(ts,NULL,RHSFunction,&appctx) is called here, after SetProblemType() and before creating Jacobian evaluation routine.   
-!
-!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Hier drin wird der Löser spezifiziert. (wenn nicht, dann default = BACKWARD Euler)+++++++++++++++++++++++++++++++++vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
-                      ! Hier geht auch allerhand anderes: 
-                      ! TSEULER           "euler"    - forward version
-                      ! TSBEULER          "beuler"   - backward version (DEFAULT)
-                      ! TSPSEUDO          "pseudo"   - ?
-                      ! TSCN              "cn"       - Crank-Nicolson                               POTENTIAL
-                      ! TSSUNDIALS        "sundials" - indir. meth.s via Sundials lib; esp. BDF     POTENTIAL
-                      ! TSRK              "rk"       - prob. not enough performance since few time steps
-                      ! TSPYTHON          "python"   - ?
-                      ! TSTHETA           "theta"    - weighted btw fw and bw?
-                      ! TSALPHA           "alpha"    - weighted btw fw and bw?
-                      ! TSGL              "gl"       - General Linear method                        POTENTIAL
-                      ! TSSSP             "ssp"      - StrongStab.Pres. - unnec.attr. for high costs ?
-                      ! TSARKIMEX         "arkimex"  - prob. not enough performance since few time steps 
-                      ! TSROSW            "rosw"     - ?
-                      ! TSEIMEX           "eimex"    - ?
-                      ! TSMIMEX           "mimex"    - ?
-                     
-                      ! CALL Petsc_TSGLSetType() instead ?
-                      CALL Petsc_TSSetType(ts,PETSC_TS_GL,ERR,ERROR,*999)
-                      ! set max r, s
-                      !todo: ttv sagt, hier stimmt was nicht. muss vielleicht r und s setzen.
-                      ! is TSCreate_GL run within this call?
-                      ! more precise: gl->schemes is not associated! but used in [tssolve ... TSGLGetMaxSizes()]
-
-! when petsc chooses a new scheme, it is documented somewhere. this could be useful information..:
-! PetscInfo7(ts,"Adapt chose scheme %d (%d,%d,%d,%d) with step size %6.2e, finish=%d\n",*next_scheme,gl->schemes[*next_scheme]->p,gl->schemes[*next_scheme]->q,gl->schemes[*next_scheme]->r,gl->schemes[*next_scheme]->s,*next_h,*finish);
-
-                      ! Q U E S T I O N : use 'TSSetTolerances()' instead?
-                      
-                      
-                      !set the initial solution to the current state, stored in STATES_TEMP
-                      CALL Petsc_VecSetValues(PETSC_CURRENT_STATES,(NUMBER_STATES), &
-                        & ARRAY_INDICES,STATES_TEMP, &
-                        & PETSC_INSERT_VALUES,ERR,ERROR,*999)
-                      !Begins assembling the vector. This routine should be called after completing all calls to VecSetValues()
-                      CALL Petsc_VecAssemblyBegin(PETSC_CURRENT_STATES,ERR,ERROR,*999)
-                      CALL Petsc_VecAssemblyEnd(PETSC_CURRENT_STATES,ERR,ERROR,*999)
-                      !Sets the initial solution vector for use by the TS routines:
-                      CALL Petsc_TSSetSolution(TS,PETSC_CURRENT_STATES,ERR,ERROR,*999)
-
-                      !set up the time data
-                      CALL Petsc_TSSetInitialTimeStep(ts,START_TIME,TIME_INCREMENT,ERR,ERROR,*999)
-                      CALL Petsc_TSSetDuration(ts,5000,END_TIME,ERR,ERROR,*999)   !arg2: 'maxsteps' ToDo: maxsteps-Höhe untersuchen.
-                      
-                      ! LOGICAL option in arg2 does not correlate with PetSc's TSSetExactFinalTime() 'eftopt'.
-                      ! <eftopt> = stepover|interpolate|matchstep. Implemented interp. or match?!
-                      CALL Petsc_TSSetExactFinalTime(ts,.TRUE.,ERR,ERROR,*999) ! ToDo: match?!?.
-
-                      IF(DIAGNOSTICS1) THEN
-                        CALL WRITE_STRING_VALUE(DIAGNOSTIC_OUTPUT_TYPE,"  DAE START TIME = ",START_TIME,ERR,ERROR,*999)
-                        CALL WRITE_STRING_VALUE(DIAGNOSTIC_OUTPUT_TYPE,"  DAE END TIME = ",END_TIME,ERR,ERROR,*999)
-                      ENDIF
-!^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-                      !set rhs function and pass through the cellml model context++++++++++++++++++++++++++++
-
-                      !Set ctx's pointers to ~arg2 - ~arg4
-                      CALL Solver_DAECellMLPETScContextSet(ctx,GL_SOLVER%DAE_SOLVER%SOLVER,cellML,dof_idx,ERR,ERROR,*999)
-
-                      ! aus PetSc: TSSetRHSFunction mit Argumenten:
-                      ! '(ts,NULL,RHSFunction,&appctx)' <=vgl.=>
-                      ! (TS,PETSC_RATES,Problem_SolverDAECellMLRHSPetsc,CTX,ERR,ERROR,*999) 
-                      !'NULL' creates the vector - we already have one.
-                      !
-                      ! 'Problem_SolverDAECellMLRHSPetsc' is the external RHS function to call
-                      CALL Petsc_TSSetRHSFunction(TS,PETSC_RATES,Problem_SolverDAECellMLRHSPetsc,CTX,ERR,ERROR,*999)
-                      ! calls TSSetRHSFunction(ts%ts,   rates%vec,   rhsFunction,ctx,err) inside. '%vec' must be set ( orallocated?!)!
-
-!NOTE: For nonlinear problems, one can provide a Jacobian evaluation routine (or use a finite differencing approximation).
-
-                      !solves all. Calls TSSolve(4 args). In PetSc implemented only with first 2!
-                      CALL Petsc_TSSolve(TS,PETSC_CURRENT_STATES,FINALSOLVEDTIME,ERR,ERROR,*999)
-                      !FINALSOLVEDTIME vllt auch erreichbar über ts%ts%solvetime?
-
-                      IF(DIAGNOSTICS1) THEN
-                        CALL WRITE_STRING_VALUE(DIAGNOSTIC_OUTPUT_TYPE,"  FINAL SOLVED TIME = ", &
-                          & FINALSOLVEDTIME,ERR,ERROR,*999)
-                      ENDIF
-
-
-                      !update the states to new integrated values
-                      CALL Petsc_VecAssemblyBegin(PETSC_CURRENT_STATES,ERR,ERROR,*999)
-                      CALL Petsc_VecAssemblyEnd(PETSC_CURRENT_STATES,ERR,ERROR,*999)
-                      CALL Petsc_VecGetValues(PETSC_CURRENT_STATES, &
-                        & NUMBER_STATES, ARRAY_INDICES, &
-                        & STATES_TEMP, &
-                        & ERR,ERROR,*999)
-
-                      DO state_idx=1,NUMBER_STATES
-                        STATE_DATA(STATE_START_DOF+state_idx-1) = STATES_TEMP(state_idx-1)
-                      ENDDO
-                      
-                      CALL Petsc_TSFinalise(TS,ERR,ERROR,*999)
-                    ENDIF !model_idx
-                    CALL Petsc_VecDestroy(PETSC_CURRENT_STATES,ERR,ERROR,*999)
-                    CALL Petsc_VecDestroy(PETSC_RATES,ERR,ERROR,*999)
-                  ENDDO !dof_idx
-
-                ELSE
-                  CALL FlagError("Cellml model is not associated.",ERR,ERROR,*999)
-                ENDIF
-              ENDIF
-            ENDIF !dof continguous
-          CASE DEFAULT
-            LOCAL_ERROR="The GL solver library type of  "// &
-              & TRIM(NumberToVString(GL_SOLVER%SOLVER_LIBRARY,"*",ERR,ERROR))//" is not implemented."
-            CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
-          END SELECT
-        ELSE
-          CALL FlagError("CELLML models field is not associated.",ERR,ERROR,*999)
-        ENDIF
-      ELSE
-        CALL FlagError("CELLML environment is not associated.",ERR,ERROR,*999)
-      ENDIF
-    ELSE
-      CALL FlagError("GL solver is not associated.",ERR,ERROR,*999)
-    ENDIF
-
-    EXITS("SOLVER_DAE_GL_INTEGRATE")
-    RETURN
-999 ERRORSEXITS("SOLVER_DAE_GL_INTEGRATE",ERR,ERROR)
-    RETURN 1
-
-  END SUBROUTINE SOLVER_DAE_GL_INTEGRATE
   
   !
   !================================================================================================================================
@@ -4522,19 +5076,265 @@ SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_I
     RETURN 1
 
   END SUBROUTINE SOLVER_DAE_BDF_SOLVE
+ 
+  !
+  !================================================================================================================================
+  !
+  !>Integrate using a GL differential-algebraic equation solver.
+
+SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_INCREMENT, &
+    & ONLY_ONE_MODEL_INDEX,MODELS_DATA,MAX_NUMBER_STATES,STATE_DATA,MAX_NUMBER_PARAMETERS,PARAMETERS_DATA, &
+    & MAX_NUMBER_INTERMEDIATES,INTERMEDIATE_DATA,ERR,ERROR,*)
+
+    !Argument variables
+    TYPE(GL_DAE_SOLVER_TYPE), POINTER :: GL_SOLVER !<A pointer the GL differential-algebraic equation solver to integrate
+    TYPE(CELLML_TYPE), POINTER :: CELLML !<A pointer to the CellML environment to integrate the equations for.
+    INTEGER(INTG), INTENT(IN) :: N !<The number of degrees-of-freedom
+    REAL(DP), INTENT(IN) :: START_TIME !<The start time for the integration
+    REAL(DP), INTENT(IN) :: END_TIME !<The end time for the integration
+    REAL(DP), INTENT(INOUT) :: TIME_INCREMENT !<The (initial) time increment for the integration
+    INTEGER(INTG), INTENT(IN) :: ONLY_ONE_MODEL_INDEX !<If only one model is used in the models data the index of that model. 0 otherwise.
+    INTEGER(INTG), POINTER, INTENT(IN) :: MODELS_DATA(:) !<MODELS_DATA(dof_idx). The models data for the dof_idx'th dof.
+    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_STATES !<The maximum number of state variables per dof
+    REAL(DP), POINTER, INTENT (INOUT) :: STATE_DATA(:) !<STATE_DATA(state_idx,dof_idx). The state data for the state_idx'th state variable of the dof_idx'th dof. state_idx varies from 1..NUMBER_STATES.
+    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_PARAMETERS !<The maximum number of parameter variables per dof.
+    REAL(DP), POINTER, INTENT(INOUT) :: PARAMETERS_DATA(:) !<PARAMETERS_DATA(parameter_idx,dof_idx). The parameters data for the parameter_idx'th parameter variable of the dof_idx'th dof. parameter_idx varies from 1..NUMBER_PARAMETERS.
+    INTEGER(INTG), INTENT(IN) :: MAX_NUMBER_INTERMEDIATES !<The maximum number of intermediate variables per dof.
+    REAL(DP), POINTER, INTENT(INOUT) :: INTERMEDIATE_DATA(:) !<INTERMEDIATE_DATA(intermediate_idx,dof_idx). The intermediate values data for the intermediate_idx'th intermediate variable of the dof_idx'th dof. intermediate_idx varies from 1.NUMBER_INTERMEDIATE
+    INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
+    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
+    !Local Variables
+    TYPE(PetscTSType) :: ts !<The PETSc TS type
+    INTEGER(INTG) :: NUMBER_OF_STEPS !<The number of steps the GL DAE solver needed to compute the next state. This is problem dependent, since PETSc will choose step sizes dynamically. 
+    REAL(DP) :: FINALSOLVEDTIME
+    TYPE(PetscVecType) :: PETSC_CURRENT_STATES !<The initial and final states for the DAE
+    TYPE(CellMLPETScContextType), POINTER :: CTX !<The passed through context
+    INTEGER(INTG) :: dof_idx,DOF_ORDER_TYPE,model_idx, NUMBER_STATES,STATE_END_DOF,state_idx,STATE_START_DOF,array_idx
+    REAL(DP), ALLOCATABLE  :: STATES_TEMP(:),RATES_TEMP(:)
+    INTEGER(INTG), ALLOCATABLE :: ARRAY_INDICES(:)
+    TYPE(CELLML_MODEL_TYPE), POINTER :: MODEL
+    TYPE(VARYING_STRING) :: LOCAL_ERROR
+    TYPE(PetscVecType) :: PETSC_RATES
+    EXTERNAL :: Problem_SolverDAECellMLRHSPetsc
+
+
+    ENTERS("SOLVER_DAE_GL_INTEGRATE",ERR,ERROR,*999)
+
+    NULLIFY(CTX)
+    IF(ASSOCIATED(GL_SOLVER)) THEN
+      IF(ASSOCIATED(CELLML)) THEN
+        IF(ASSOCIATED(CELLML%MODELS_FIELD)) THEN
+          SELECT CASE(GL_SOLVER%SOLVER_LIBRARY)
+          CASE(SOLVER_PETSC_LIBRARY)
+            CALL FIELD_DOF_ORDER_TYPE_GET(CELLML%MODELS_FIELD%MODELS_FIELD, &
+              & FIELD_U_VARIABLE_TYPE,DOF_ORDER_TYPE,ERR,ERROR,*999)
+            IF(DOF_ORDER_TYPE==FIELD_SEPARATED_COMPONENT_DOF_ORDER) THEN
+
+            ELSE !dof component order is contiguous
+              IF(ONLY_ONE_MODEL_INDEX==CELLML_MODELS_FIELD_NOT_CONSTANT) THEN
+
+              ELSE !only one model
+                MODEL=>CELLML%MODELS(ONLY_ONE_MODEL_INDEX)%PTR
+                IF(ASSOCIATED(MODEL)) THEN
+                  !determine no. of states in model and allocate necessary arrays
+                  NUMBER_STATES = MODEL%NUMBER_OF_STATE
+                  ALLOCATE(STATES_TEMP(0:NUMBER_STATES-1),STAT=ERR)
+                  ALLOCATE(RATES_TEMP(0:NUMBER_STATES-1),STAT=ERR)
+                  ALLOCATE(ARRAY_INDICES(0:NUMBER_STATES-1),STAT=ERR)
+                  ARRAY_INDICES = (/(array_idx,array_idx=0,(NUMBER_STATES-1))/)
+
+
+                  !initialize context for petsc solving.
+                  CALL Solver_DAECellMLPETScContextInitialise(CTX,err,error,*999) 
+!                      ctx beinhaltet:  
+!                                       ctx%solver, - A pointer to the solver
+!                                       ctx%cellml, - A pointer to the CellML environment
+!                                       ctx%rates,  - the time derivative of the state
+!                                       ctx%dofIdx, - The DOF index of the cellml-petsc context
+
+                  DO dof_idx=1,N
+                    model_idx = MODELS_DATA(dof_idx)
+                    IF(model_idx>0) THEN !if model is assigned to dof
+                      !access the state field data
+                      STATE_START_DOF=(dof_idx-1)*MAX_NUMBER_STATES+1
+                      STATE_END_DOF=STATE_START_DOF+NUMBER_STATES-1
+                      DO state_idx=1,NUMBER_STATES
+                        STATES_TEMP(state_idx-1) = STATE_DATA(STATE_START_DOF+state_idx-1)
+                      ENDDO
+
+                      !+++++++create PETSC states vector to initialize solver+++++++++
+                      !Create a standard, sequential array-style vector:
+                      !Input: MPI-communicator, Vector length
+                      !OUTPUT: PETSC_CURRENT_STATES - the created vector.
+                      CALL Petsc_VecInitialise(PETSC_CURRENT_STATES,err,error,*999)
+                      CALL Petsc_VecCreateSeq(PETSC_COMM_SELF, &
+                        & NUMBER_STATES,PETSC_CURRENT_STATES,ERR,ERROR,*999)
+
+                      !would set the local and global sizes, and check to determine compatibility
+                      ! see: http://www.mcs.anl.gov/petsc/petsc-current/docs/manualpages/Vec/VecSetFromOptions.html
+                      !CALL Petsc_VecSetSizes(PETSC_CURRENT_STATES, &
+                      !  & PETSC_DECIDE,(NUMBER_STATES),ERR,ERROR,*999)
+
+                      !would configure the vector from the options database. Init as vec: 'PETSC_CURRENT_STATES'
+                      !CALL Petsc_VecSetFromOptions(PETSC_CURRENT_STATES,ERR,ERROR,*999)
+
+                      !create PETSC rates vector to return values from evaluating rhs routine (dx/dt=rhs)
+                      CALL Petsc_VecCreateSeq(PETSC_COMM_SELF, &
+                        & NUMBER_STATES,PETSC_RATES,ERR,ERROR,*999)
+                      !CALL Petsc_VecSetSizes(PETSC_RATES, &
+                      !  & PETSC_DECIDE,(NUMBER_STATES),ERR,ERROR,*999)
+                      !CALL Petsc_VecSetFromOptions(PETSC_RATES,ERR,ERROR,*999)
+
+                      !Set up PETSC TS context for GL solver
+                      CALL Petsc_TSCreate(PETSC_COMM_SELF,ts,ERR,ERROR,*999)
+
+                      CALL Petsc_TSSetProblemType(ts,PETSC_TS_NONLINEAR,ERR,ERROR,*999)
+!
+                      ! D I F F E R E N C E   T O   P E T S C   E X A M P L E S : 
+!
+!                     # TSSetRHSFunction(ts,NULL,RHSFunction,&appctx) is called here, after SetProblemType() and before creating Jacobian evaluation routine.   
+!
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Hier drin wird der Löser spezifiziert. (wenn nicht, dann default = BACKWARD Euler)+++++++++++++++++++++++++++++++++vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+                      ! Hier geht auch allerhand anderes: 
+                      ! TSEULER           "euler"    - forward version
+                      ! TSBEULER          "beuler"   - backward version (DEFAULT)
+                      ! TSPSEUDO          "pseudo"   - ?
+                      ! TSCN              "cn"       - Crank-Nicolson                               POTENTIAL
+                      ! TSSUNDIALS        "sundials" - indir. meth.s via Sundials lib; esp. BDF     POTENTIAL
+                      ! TSRK              "rk"       - prob. not enough performance since few time steps
+                      ! TSPYTHON          "python"   - ?
+                      ! TSTHETA           "theta"    - weighted btw fw and bw?
+                      ! TSALPHA           "alpha"    - weighted btw fw and bw?
+                      ! TSGL              "gl"       - General Linear method                        POTENTIAL
+                      ! TSSSP             "ssp"      - StrongStab.Pres. - unnec.attr. for high costs ?
+                      ! TSARKIMEX         "arkimex"  - prob. not enough performance since few time steps 
+                      ! TSROSW            "rosw"     - ?
+                      ! TSEIMEX           "eimex"    - ?
+                      ! TSMIMEX           "mimex"    - ?
+                     
+
+! when petsc chooses a new scheme, it is documented somewhere. this could be useful information..:
+! PetscInfo7(ts,"Adapt chose scheme %d (%d,%d,%d,%d) with step size %6.2e, finish=%d\n",*next_scheme,gl->schemes[*next_scheme]->p,gl->schemes[*next_scheme]->q,gl->schemes[*next_scheme]->r,gl->schemes[*next_scheme]->s,*next_h,*finish);
+
+                      ! Q U E S T I O N : use 'TSSetTolerances()' instead?
+                      
+                      
+                      !set the initial solution to the current state, stored in STATES_TEMP
+                      CALL Petsc_VecSetValues(PETSC_CURRENT_STATES,(NUMBER_STATES), &
+                        & ARRAY_INDICES,STATES_TEMP, &
+                        & PETSC_INSERT_VALUES,ERR,ERROR,*999)
+                      !Begins assembling the vector. This routine should be called after completing all calls to VecSetValues()
+                      CALL Petsc_VecAssemblyBegin(PETSC_CURRENT_STATES,ERR,ERROR,*999)
+                      CALL Petsc_VecAssemblyEnd(PETSC_CURRENT_STATES,ERR,ERROR,*999)
+                      !Sets the initial solution vector for use by the TS routines:
+                      CALL Petsc_TSSetSolution(TS,PETSC_CURRENT_STATES,ERR,ERROR,*999) 
+                      
+                      ! CALL Petsc_TSGLSetType() instead ?
+                      CALL Petsc_TSSetType(ts,PETSC_TS_GL,ERR,ERROR,*999)
+                      !CALL Petsc_TSGLCreate_IRKS(ts,ERR,ERROR,*999)
+                      ! set max r, s
+                      !todo: ttv sagt, hier stimmt was nicht. muss vielleicht r und s setzen.
+                      ! is TSCreate_GL run within this call?
+                      ! more precise: gl->schemes is not associated! but used in [tssolve ... TSGLGetMaxSizes()]
+
+                      !set up the time data
+                      CALL Petsc_TSSetDuration(ts,5000,END_TIME,ERR,ERROR,*999)   !arg2: 'maxsteps' ToDo: maxsteps-Höhe untersuchen.
+                      CALL Petsc_TSSetInitialTimeStep(ts,START_TIME,TIME_INCREMENT,ERR,ERROR,*999)
+                      ! LOGICAL option in arg2 does not correlate with PetSc's TSSetExactFinalTime() 'eftopt'.
+                      ! <eftopt> = stepover|interpolate|matchstep. Implemented interp. or match?!
+                      CALL Petsc_TSSetExactFinalTime(ts,.TRUE.,ERR,ERROR,*999) ! ToDo: match?!?.
+                      
+                      
+
+                      IF(DIAGNOSTICS1) THEN
+                        CALL WRITE_STRING_VALUE(DIAGNOSTIC_OUTPUT_TYPE,"  DAE START TIME = ",START_TIME,ERR,ERROR,*999)
+                        CALL WRITE_STRING_VALUE(DIAGNOSTIC_OUTPUT_TYPE,"  DAE END TIME = ",END_TIME,ERR,ERROR,*999)
+                      ENDIF
+!^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+                      ! set rhs function and pass through the cellml model context++++++++++++++++++++++++++++
+                      !Set ctx's pointers to ~arg2 - ~arg4
+                      CALL Solver_DAECellMLPETScContextSet(CTX,GL_SOLVER%DAE_SOLVER%SOLVER,cellML,dof_idx,ERR,ERROR,*999)
+
+                      ! aus PetSc: TSSetRHSFunction mit Argumenten:
+                      ! '(ts,NULL,RHSFunction,&appctx)' <=vgl.=>
+                      ! (TS,PETSC_RATES,Problem_SolverDAECellMLRHSPetsc,CTX,ERR,ERROR,*999) 
+                      !'NULL' creates the vector - we already have one.
+                      !
+                      ! 'Problem_SolverDAECellMLRHSPetsc' is the external RHS function to call
+                      CALL Petsc_TSSetRHSFunction(TS,PETSC_RATES,Problem_SolverDAECellMLRHSPetsc,CTX,ERR,ERROR,*999)
+                      ! calls TSSetRHSFunction(ts%ts,   rates%vec,   rhsFunction,ctx,err) inside. '%vec' must be set ( orallocated?!)!
+                      ! The CALL to Petsc_TSSetFromOptions() has to be after Petsc_TSSetRHSFunction() since PETScs ts->snes has to be allocated BEFORE it is used in SetFromOptions.
+                      CALL Petsc_TSSetFromOptions(ts,ERR,ERROR,*999)
+                      ! +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+!NOTE: For nonlinear problems, one can provide a Jacobian evaluation routine (or use a finite differencing approximation).
+
+                      !solves all. Calls TSSolve(4 args). In PetSc implemented only with first 2!
+                      CALL Petsc_TSSolve(TS,PETSC_CURRENT_STATES,FINALSOLVEDTIME,ERR,ERROR,*999)
+                      !FINALSOLVEDTIME vllt auch erreichbar über ts%ts%solvetime?
+
+                      IF(DIAGNOSTICS1) THEN
+                        CALL WRITE_STRING_VALUE(DIAGNOSTIC_OUTPUT_TYPE,"  FINAL SOLVED TIME = ", &
+                          & FINALSOLVEDTIME,ERR,ERROR,*999)
+                      ENDIF
+
+
+                      !update the states to new integrated values
+                      CALL Petsc_VecAssemblyBegin(PETSC_CURRENT_STATES,ERR,ERROR,*999)
+                      CALL Petsc_VecAssemblyEnd(PETSC_CURRENT_STATES,ERR,ERROR,*999)
+                      CALL Petsc_VecGetValues(PETSC_CURRENT_STATES, &
+                        & NUMBER_STATES, ARRAY_INDICES, &
+                        & STATES_TEMP, &
+                        & ERR,ERROR,*999)
+
+                      DO state_idx=1,NUMBER_STATES
+                        STATE_DATA(STATE_START_DOF+state_idx-1) = STATES_TEMP(state_idx-1)
+                      ENDDO
+                      
+                      CALL Petsc_TSFinalise(TS,ERR,ERROR,*999)
+                    ENDIF !model_idx
+                    CALL Petsc_VecDestroy(PETSC_CURRENT_STATES,ERR,ERROR,*999)
+                    CALL Petsc_VecDestroy(PETSC_RATES,ERR,ERROR,*999)
+                  ENDDO !dof_idx
+
+                ELSE
+                  CALL FlagError("Cellml model is not associated.",ERR,ERROR,*999)
+                ENDIF
+              ENDIF
+            ENDIF !dof continguous
+          CASE DEFAULT
+            LOCAL_ERROR="The GL solver library type of  "// &
+              & TRIM(NumberToVString(GL_SOLVER%SOLVER_LIBRARY,"*",ERR,ERROR))//" is not implemented."
+            CALL FlagError(LOCAL_ERROR,ERR,ERROR,*999)
+          END SELECT
+        ELSE
+          CALL FlagError("CELLML models field is not associated.",ERR,ERROR,*999)
+        ENDIF
+      ELSE
+        CALL FlagError("CELLML environment is not associated.",ERR,ERROR,*999)
+      ENDIF
+    ELSE
+      CALL FlagError("GL solver is not associated.",ERR,ERROR,*999)
+    ENDIF
+
+    EXITS("SOLVER_DAE_GL_INTEGRATE")
+    RETURN
+999 ERRORSEXITS("SOLVER_DAE_GL_INTEGRATE",ERR,ERROR)
+    RETURN 1
+
+  END SUBROUTINE SOLVER_DAE_GL_INTEGRATE
 
   !
   !================================================================================================================================
   !
 
-  !(>)Solve using a GL differential-algebraic equation solver. 
+  !>Solve using a GL differential-algebraic equation solver. 
   ! This subroutine could get a common interface with the BDF-version above, or they even could get matched into one single subroutine.
   SUBROUTINE SOLVER_DAE_GL_SOLVE(GL_SOLVER,ERR,ERROR,*)
 
     !Argument variables
-    TYPE(GL_DAE_SOLVER_TYPE), POINTER :: GL_SOLVER !(<) pointer the GL differential-algebraic equation solver to solve
-    INTEGER(INTG), INTENT(OUT) :: ERR !(<)The error code
-    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !(<)The error string
+    TYPE(GL_DAE_SOLVER_TYPE), POINTER :: GL_SOLVER !< pointer the GL differential-algebraic equation solver to solve
+    INTEGER(INTG), INTENT(OUT) :: ERR !<The error code
+    TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
     !Local Variables
     INTEGER(INTG) :: cellml_idx
     INTEGER(INTG), POINTER :: MODELS_DATA(:)
@@ -5568,7 +6368,7 @@ SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_I
     TYPE(CELLML_STATE_FIELD_TYPE), POINTER :: CELLML_STATE_FIELD
     TYPE(SOLVER_TYPE), POINTER :: SOLVER
     TYPE(VARYING_STRING) :: LOCAL_ERROR
-    REAL(SP) :: TIME1(1), TIME2(1)
+    REAL(DP) :: TIME1(1), TIME2(1)
 
     ENTERS("SOLVER_DAE_SOLVE",ERR,ERROR,*999)
     
@@ -5596,7 +6396,7 @@ SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_I
         CASE(SOLVER_DAE_RUSH_LARSON)
           CALL SOLVER_DAE_RUSH_LARSON_SOLVE(DAE_SOLVER%RUSH_LARSON_SOLVER,ERR,ERROR,*999)
         CASE(SOLVER_DAE_EXTERNAL)
-          CALL SOLVER_DAE_EXTERNAL_SOLVE(DAE_SOLVER%EXTERNAL_SOLVER,ERR,ERROR,*999)
+          CALL SOLVER_DAE_EXTERNAL_SOLVE(DAE_SOLVER%EXTERNAL_SOLVER,ERR,ERROR,*999)     
         CASE DEFAULT
           LOCAL_ERROR="The differential-algebraic equation solver solve type of "// &
             & TRIM(NumberToVString(DAE_SOLVER%DAE_SOLVE_TYPE,"*",ERR,ERROR))//" is invalid."
@@ -7385,53 +8185,53 @@ SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_I
                 CALL TAU_STATIC_PHASE_START('1.2.3.1 dynamic mean predicted calculate')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStart("1.2.3.1 dynamic mean predicted calculate")
+                CALL CustomProfilingStart("level 3: 1D other")
 #endif
                 !Assemble the solver equations
                 CALL SOLVER_DYNAMIC_MEAN_PREDICTED_CALCULATE(SOLVER,ERR,ERROR,*999)
 
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStop("1.2.3.1 dynamic mean predicted calculate")
+                CALL CustomProfilingStop("level 3: 1D other")
 #endif
 #ifdef TAUPROF
                 CALL TAU_STATIC_PHASE_STOP('1.2.3.1 dynamic mean predicted calculate')
                 CALL TAU_STATIC_PHASE_START('1.2.3.2 dynamic assemble')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStart("1.2.3.2 dynamic assemble")
+                CALL CustomProfilingStart("level 3: 1D assembly")
 #endif
 
                 CALL SOLVER_MATRICES_DYNAMIC_ASSEMBLE(SOLVER,SOLVER_MATRICES_LINEAR_ONLY,ERR,ERROR,*999)
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStop("1.2.3.2 dynamic assemble")
+                CALL CustomProfilingStop("level 3: 1D assembly")
 #endif
 #ifdef TAUPROF
                 CALL TAU_STATIC_PHASE_STOP('1.2.3.2 dynamic assemble')
                 CALL TAU_STATIC_PHASE_START('1.2.3.3 solve linear system')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStart("1.2.3.3 solve linear system")
+                CALL CustomProfilingStart("level 3: 1D solve")
 #endif
 
                 !Solve the linear system
                 CALL SOLVER_SOLVE(LINEAR_SOLVER,ERR,ERROR,*999)
 
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStop("1.2.3.3 solve linear system")
+                CALL CustomProfilingStop("level 3: 1D solve")
 #endif
 #ifdef TAUPROF
                 CALL TAU_STATIC_PHASE_STOP('1.2.3.3 solve linear system')
                 CALL TAU_STATIC_PHASE_START('1.2.3.4 update dependent field')
 #endif
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStart("1.2.3.4 update dependent field")
+                CALL CustomProfilingStart("level 3: 1D other")
 #endif
 
                 !Update dependent field with solution
                 CALL SOLVER_VARIABLES_DYNAMIC_FIELD_UPDATE(SOLVER,ERR,ERROR,*999)
 
 #ifdef USE_CUSTOM_PROFILING
-                CALL CustomProfilingStop("1.2.3.4 update dependent field")
+                CALL CustomProfilingStop("level 3: 1D other")
 #endif
 #ifdef TAUPROF
                 CALL TAU_STATIC_PHASE_STOP('1.2.3.4 update dependent field')
@@ -19858,14 +20658,14 @@ SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_I
 #ifdef TAUPROF
                           CALL TAU_STATIC_PHASE_START('1.3.3.1.3.1 newton update solution vector')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                          CALL CustomProfilingStart("1.3.3.1.3.1 newton update solution vector")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                          CALL CustomProfilingStart("level 3: 3D SOLVER_SOLUTION_UPDATE")
+!#endif
                           !Make sure the solver vector contains the current dependent field values
                           CALL SOLVER_SOLUTION_UPDATE(SOLVER,ERR,ERROR,*999)
-#ifdef USE_CUSTOM_PROFILING
-                          CALL CustomProfilingStop("1.3.3.1.3.1 newton update solution vector")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                          CALL CustomProfilingStop("level 3: 3D SOLVER_SOLUTION_UPDATE")
+!#endif
 #ifdef TAUPROF
                           CALL TAU_STATIC_PHASE_STOP('1.3.3.1.3.1 newton update solution vector')
 #endif
@@ -19881,24 +20681,24 @@ SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_I
 #ifdef TAUPROF
                         CALL TAU_STATIC_PHASE_START('1.3.3.1.3.2 newton Petsc solve')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                        CALL CustomProfilingStart("1.3.3.1.3.2 newton Petsc solve")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                        CALL CustomProfilingStart("level 3: 3D Petsc_SnesSolve")
+!#endif
                         !Solve the nonlinear equations
                         CALL Petsc_SnesSolve(LINESEARCH_SOLVER%snes,RHS_VECTOR%PETSC%VECTOR,SOLVER_VECTOR%PETSC%VECTOR, &
                           & ERR,ERROR,*999)
 
-#ifdef USE_CUSTOM_PROFILING
-                        CALL CustomProfilingStop("1.3.3.1.3.2 newton Petsc solve")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                        CALL CustomProfilingStop("level 3: 3D Petsc_SnesSolve")
+!#endif
 
 #ifdef TAUPROF
                         CALL TAU_STATIC_PHASE_STOP('1.3.3.1.3.2 newton Petsc solve')
                         CALL TAU_STATIC_PHASE_START('1.3.3.1.3.3 newton diagnostics')
 #endif
-#ifdef USE_CUSTOM_PROFILING
-                        CALL CustomProfilingStart("1.3.3.1.3.3 newton diagnostics")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                        CALL CustomProfilingStart("1.3.3.1.3.3 newton diagnostics")
+!#endif
 
                         !Check for convergence
                         CALL Petsc_SnesGetConvergedReason(LINESEARCH_SOLVER%snes,CONVERGED_REASON,ERR,ERROR,*999)
@@ -19980,9 +20780,9 @@ SUBROUTINE SOLVER_DAE_GL_INTEGRATE(GL_SOLVER,CELLML,N,START_TIME,END_TIME,TIME_I
                           END SELECT
                         ENDIF
 
-#ifdef USE_CUSTOM_PROFILING
-                        CALL CustomProfilingStop("1.3.3.1.3.3 newton diagnostics")
-#endif
+!#ifdef USE_CUSTOM_PROFILING
+!                        CALL CustomProfilingStop("1.3.3.1.3.3 newton diagnostics")
+!#endif
 
 #ifdef TAUPROF
                         CALL TAU_STATIC_PHASE_STOP('1.3.3.1.3.3 newton diagnostics')

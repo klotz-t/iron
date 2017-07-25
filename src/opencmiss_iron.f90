@@ -413,7 +413,7 @@ MODULE OpenCMISS_Iron
     & cmfe_PrintSolverEquationsM, &
     & cmfe_CustomProfilingStart,cmfe_CustomProfilingStop,cmfe_CustomProfilingMemory,cmfe_CustomProfilingGetInfo, &
     & cmfe_CustomProfilingGetDuration,cmfe_CustomProfilingGetMemory,cmfe_CustomProfilingGetSizePerElement, &
-    & cmfe_CustomProfilingGetNumberObjects, cmfe_CustomProfilingGetEnabled
+    & cmfe_CustomProfilingGetNumberObjects, cmfe_CustomProfilingGetEnabled, cmfe_CustomProfilingReset
   PUBLIC cmfe_PrintMesh, cmfe_PrintFields, cmfe_PrintDistributedMatrix, cmfe_PrintRegion, cmfe_PrintMeshelementstype, &
     & cmfe_PrintInterfacepointsconnectivitytype, cmfe_PrintQuadrature, cmfe_PrintSolverEquations, cmfe_PrintNodes, &
     & cmfe_PrintDataPoints, cmfe_PrintSolver, cmfe_PrintField, cmfe_PrintCoordinateSystem, cmfe_PrintDataProjection, &
@@ -6190,6 +6190,7 @@ MODULE OpenCMISS_Iron
   INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_GL = SOLVER_DAE_GL !<General Linear (GL) differential-algebraic equation solver. \see
   INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_RUSH_LARSON = SOLVER_DAE_RUSH_LARSON !<Rush-Larson differential-algebraic equation solver. \see
   INTEGER(INTG), PARAMETER :: CMFE_SOLVER_DAE_EXTERNAL = SOLVER_DAE_EXTERNAL !<External (e.g., CellML generated) differential-algebraic equation solver. \see
+
   !>@}
   !> \addtogroup OPENCMISS_EulerDAESolverTypes OPENCMISS::Solver::EulerDAESolverTypes
   !> \brief The Euler solver types for a differential-algebriac equation solver.
@@ -6904,7 +6905,8 @@ MODULE OpenCMISS_Iron
 
   PUBLIC cmfe_CellMLEquations_CellMLAdd
 
-  PUBLIC cmfe_Solver_DAEEulerSolverTypeGet,cmfe_Solver_DAEEulerSolverTypeSet
+  PUBLIC cmfe_Solver_DAEEulerSolverTypeGet,cmfe_Solver_DAEEulerSolverTypeSet, &
+   & cmfe_Solver_DAEEulerForwardSetNSteps,cmfe_Solver_DAEEulerImprovedSetNSteps
 
   PUBLIC cmfe_Solver_DAESolverTypeGet,cmfe_Solver_DAESolverTypeSet
 
@@ -48312,13 +48314,13 @@ CONTAINS
 #endif
 
 #ifdef USE_CUSTOM_PROFILING
-    CALL CustomProfilingStart('1. problem solve')
+    CALL CustomProfilingStart('level 0: problem solve')
 #endif
 
     CALL PROBLEM_SOLVE(problem%problem,err,error,*999)
 
 #ifdef USE_CUSTOM_PROFILING
-    CALL CustomProfilingStop('1. problem solve')
+    CALL CustomProfilingStop('level 0: problem solve')
 #endif
 
 #ifdef TAUPROF
@@ -50295,7 +50297,77 @@ CONTAINS
   !
   !================================================================================================================================
   !
+  
+  !>Sets the number of time sets for the forward Euler differential-algebraic equation solver.
+  SUBROUTINE cmfe_Solver_DAEEulerForwardSetNSteps(solver,number_timesteps,err)
 
+    !Argument variables
+    TYPE(cmfe_SolverType), INTENT(IN) :: solver !<The solver to set the number of time steps for.
+    INTEGER(INTG) :: number_timesteps !<The number it is to be set to.
+    INTEGER(INTG), INTENT(OUT) :: err !<The error code.
+    !Local variables
+    TYPE(VARYING_STRING) :: localError
+
+    ENTERS("cmfe_Solver_DAEEulerForwardSetNSteps",err,error,*999)
+    
+    IF(ASSOCIATED(solver%solver)) THEN
+      IF(ASSOCIATED(solver%solver%DAE_SOLVER)) THEN
+        CALL SOLVER_DAE_EULER_FORWARD_SET_NSTEPS(solver%solver%DAE_SOLVER,number_timesteps,err,error,*999)
+      ELSE
+        localError="The DAE solver is not associated."
+        CALL FlagError(localError,err,error,*999)
+      END IF    
+    ELSE
+      localError="The solver is not associated."
+      CALL FlagError(localError,err,error,*999)
+    END IF
+
+    EXITS("cmfe_Solver_DAEEulerForwardSetNSteps")
+    RETURN
+999 ERRORSEXITS("cmfe_Solver_DAEEulerForwardSetNSteps",err,error)
+    CALL cmfe_HandleError(err,error)
+    RETURN
+  END SUBROUTINE cmfe_Solver_DAEEulerForwardSetNSteps
+
+  !
+  !================================================================================================================================
+  !
+  
+  !>Sets the number of time sets for the improved Euler differential-algebraic equation solver.
+  SUBROUTINE cmfe_Solver_DAEEulerImprovedSetNSteps(solver,number_timesteps,err)
+
+    !Argument variables
+    TYPE(cmfe_SolverType), INTENT(IN) :: solver !<The solver to set the number of time steps for.
+    INTEGER(INTG) :: number_timesteps !<The number it is to be set to.
+    INTEGER(INTG), INTENT(OUT) :: err !<The error code.
+    !Local variables
+    TYPE(VARYING_STRING) :: localError
+
+    ENTERS("cmfe_Solver_DAEEulerImprovedSetNSteps",err,error,*999)
+    
+    IF(ASSOCIATED(solver%solver)) THEN
+      IF(ASSOCIATED(solver%solver%DAE_SOLVER)) THEN
+        CALL SOLVER_DAE_EULER_IMPROVED_SET_NSTEPS(solver%solver%DAE_SOLVER,number_timesteps,err,error,*999)
+      ELSE
+        localError="The DAE solver is not associated."
+        CALL FlagError(localError,err,error,*999)
+      END IF    
+    ELSE
+      localError="The solver is not associated."
+      CALL FlagError(localError,err,error,*999)
+    END IF
+
+    EXITS("cmfe_Solver_DAEEulerImprovedSetNSteps")
+    RETURN
+999 ERRORSEXITS("cmfe_Solver_DAEEulerImprovedSetNSteps",err,error)
+    CALL cmfe_HandleError(err,error)
+    RETURN
+  END SUBROUTINE cmfe_Solver_DAEEulerImprovedSetNSteps
+
+  !
+  !================================================================================================================================
+  !
+  
   !>Sets/changes the solve type for an Euler differential-algebraic equation solver identified by an user number.
   SUBROUTINE cmfe_Solver_DAEEulerSolverTypeSetNumber1(problemUserNumber,controlLoopIdentifiers,solverIndex,DAEEulerSolverType,err)
     !DLLEXPORT(cmfe_Solver_DAEEulerSolverTypeSetNumber1)
@@ -62228,6 +62300,14 @@ CONTAINS
 #endif
   END SUBROUTINE cmfe_CustomProfilingGetEnabled
 
+  !
+  !================================================================================================================================
+  !
+  SUBROUTINE cmfe_CustomProfilingReset(Err)
+    INTEGER(INTG), INTENT(OUT) :: err !<The error code.
+    
+    CALL CustomProfilingReset()
+  END SUBROUTINE cmfe_CustomProfilingReset
 
 !!==================================================================================================================================
 !!
