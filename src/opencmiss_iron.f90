@@ -4109,7 +4109,7 @@ MODULE OpenCMISS_Iron
 
   PUBLIC cmfe_Fields_ElementsExport,cmfe_Fields_NodesExport
 
-  PUBLIC cmfe_ReadMeshInfo,cmfe_ReadMeshFiles,cmfe_ReadMeshFilesCubit
+  PUBLIC cmfe_ReadMesh,cmfe_ReadMeshFilesCubit
 
 !!==================================================================================================================================
 !!
@@ -62717,38 +62717,49 @@ CONTAINS
     RETURN
  
   END SUBROUTINE cmfe_DomainTopologyNodeCheckExists
-  
+
   !
   !================================================================================================================================
   !
-  ! This routine reads input mesh files in CHeart X/T/B format and stores mesh info to make sure the user is able to allocate variables
+  ! This routine reads input mesh files in CHeart X/T/B format and stores them in arrays
   ! Note: this routine makes use of the Fortran 2008 feature to obtain a file unit that is free
-  ! Note: assumes that the mesh contains only one mesh type
-  SUBROUTINE cmfe_ReadMeshInfo(Filename, NumberOfDimensions, NumberOfNodes, NumberOfElements, &
-    & NumberOfNodesPerElement, NumberOfBoundaryPatches, NumberOfBoundaryPatchComponents, Method, Err)
+  ! Note: Need to call cmfe_ReadMeshInfo beforehand, where sanity checks have been done
+  SUBROUTINE cmfe_ReadMesh(Filename, Nodes, Elements, BoundaryPatches, Method, Err)
     ! IN / OUT variables
-    CHARACTER(LEN=*),   INTENT(IN)                  :: Filename                         !< The file name to import the mesh data from
-    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfDimensions               !< The number of components of the mesh coordinates
-    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfNodes                    !< The number of nodes in the mesh
-    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfElements                 !< The number of elements in the mesh
-    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfNodesPerElement          !< The number of nodes per element in the mesh
-    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfBoundaryPatches          !< The number of boundary patches for the mesh
-    INTEGER(INTG),      INTENT(OUT)                 :: NumberOfBoundaryPatchComponents  !< The number of boundary patch components for the mesh
-    CHARACTER(LEN=*),   INTENT(IN)                  :: Method                           !< The import method to use, e.g, CHeart, Cmgui, etc.
-    INTEGER(INTG),      INTENT(OUT)                 :: Err                              !< The error code.
+    CHARACTER(LEN=*),                   INTENT(IN)  :: Filename             !< The file name to import the mesh data from
+    REAL(DP),           ALLOCATABLE,    INTENT(OUT) :: Nodes(:,:)           !< The coordinates of the mesh nodes
+    INTEGER(INTG),      ALLOCATABLE,    INTENT(OUT) :: Elements(:,:)        !< The node IDs for each element
+    INTEGER(INTG),      ALLOCATABLE,    INTENT(OUT) :: BoundaryPatches(:)   !< The boundary patch labels for all boundary nodes
+    CHARACTER(LEN=*),                   INTENT(IN)  :: Method               !< The method to use, e.g, CHeart, Cubit, etc.
+    INTEGER(INTG),                      INTENT(OUT) :: Err                  !< The error code.
     ! Local variables
     TYPE(VARYING_STRING)                            :: VFileName,VMethod
     INTEGER(INTG)                                   :: FilenameLength,MethodLength
     INTEGER(INTG)                                   :: NodeFileUnit,ElementFileUnit,BoundaryFileUnit
     INTEGER(INTG)                                   :: NodeHeader(2),ElementHeader(2),BoundaryHeader
+    INTEGER(INTG)                                   :: NumberOfNodes,NumberOfDimensions
+    INTEGER(INTG)                                   :: NumberOfElements,NumberOfNodesPerElement
+    INTEGER(INTG)                                   :: NumberOfBoundaryPatches,NumberOfBoundaryPatchComponents
+    INTEGER(INTG)                                   :: IntValue,CurrentIdx,ComponentIdx,PatchIdx,CurrentPatchID,Offset,Idx
+    INTEGER(INTG)                                   :: CharacterIdx,FirstIdx,PreviousIdx
+    INTEGER(INTG), ALLOCATABLE                      :: Permutation(:),IntValuesT(:),IntValuesB(:),BoundaryPatchesTemp(:,:)
+    INTEGER(INTG)                                   :: NumberOfPatchIDs
+    INTEGER(INTG)                                   :: PatchIDs(25),NumberOfNodesPerPatchID(25),CurrentFirstPatchIdx(25)
     INTEGER(INTG)                                   :: NumberOfNodesT,NumberOfNodesB
     INTEGER(INTG)                                   :: FirstLineOfElementFile(27)
     CHARACTER(LEN=256)                              :: Line
-    INTEGER(INTG)                                   :: CharacterIdx,CurrentIdx,PreviousIdx,FirstIdx,IntValue
 
-    ENTERS("cmfe_ReadMeshInfo", Err, Error, *999)
-
+    ENTERS("cmfe_ReadMesh", Err, Error, *999)
+    !===========================================================================
+    ! Check, if intent(out) variables are already allocated
+    IF(ALLOCATED(Nodes))            CALL FlagError("Nodes already allocated.",Err,Error,*999)
+    IF(ALLOCATED(Elements))         CALL FlagError("Elements already allocated.",Err,Error,*999)
+    IF(ALLOCATED(BoundaryPatches))  CALL FlagError("BoundaryPatches already allocated.",Err,Error,*999)
+    !===========================================================================
     ! Initialize variables
+    PatchIDs                = -1_INTG ! default, not present
+    NumberOfNodesPerPatchID =  0_INTG
+    NumberOfPatchIDs        =  0_INTG
     NumberOfDimensions      = 0_INTG
     NodeHeader              = 0_INTG
     ElementHeader           = 0_INTG
@@ -62758,37 +62769,38 @@ CONTAINS
     NumberOfBoundaryPatches = 0_INTG
     NumberOfNodesPerElement = 0_INTG
     NumberOfNodesT          = 0_INTG
-
+    !===========================================================================
     ! Get file name and method name
     FilenameLength  = LEN_TRIM(Filename)
     VFilename       = Filename(1:FilenameLength)
     MethodLength    = LEN_TRIM(Method)
     VMethod         = Method(1:MethodLength)
-
+    !===========================================================================
     ! Reading the X/T/B files from CHeart file format
     IF(VMethod=="CHeart") THEN
-      ! Get available file units (Fortran 2008 feature)
+      !=========================================================================
+      ! Get available file units (Fortran 2008 feature) and read first line
       OPEN(NEWUNIT=NodeFileUnit,     FILE=CHAR(VFilename)//".X", ACTION="read")
       OPEN(NEWUNIT=ElementFileUnit,  FILE=CHAR(VFilename)//".T", ACTION="read")
       OPEN(NEWUNIT=BoundaryFileUnit, FILE=CHAR(VFilename)//".B", ACTION="read")
-      
-      ! Get some mesh information
       READ(NodeFileUnit, *)     NodeHeader
       READ(ElementFileUnit, *)  ElementHeader
       READ(BoundaryFileUnit, *) BoundaryHeader
+      !=========================================================================
+      ! Get some mesh information
       NumberOfNodes             = NodeHeader(1)
       NumberOfDimensions        = NodeHeader(2)
       NumberOfElements          = ElementHeader(1)
       NumberOfNodesT            = ElementHeader(2)
       NumberOfBoundaryPatches   = BoundaryHeader
-
+      !=========================================================================
       ! Do some sanity checks before reading mesh data
       IF(.NOT.(NumberOfNodes==NumberOfNodesT))  CALL FlagError("X and T files have different number of nodes.", Err, Error, *999)
       IF(NumberOfNodes<0_INTG)                  CALL FlagError("Invalid number of nodes.", Err, Error, *999)
       IF(NumberOfDimensions<0_INTG)             CALL FlagError("Invalid number of dimensions.", Err, Error, *999)
       IF(NumberOfElements<0_INTG)               CALL FlagError("Invalid number of elements.", Err, Error, *999)
       IF(NumberOfBoundaryPatches<0_INTG)        CALL FlagError("Invalid number of boundary patches.", Err, Error, *999)
-
+      !=========================================================================
       ! To get the number of nodes per element, we have to do a little trick:
       ! We read the first non-header line of the element file and read each integer value
       READ(ElementFileUnit,'(A)') Line
@@ -62805,116 +62817,20 @@ CONTAINS
         END IF
         PreviousIdx = CurrentIdx
       END DO
-
-      ! Figure out how many components the boundary file has
-      SELECT CASE(NumberOfDimensions)
-      CASE(2)
-        SELECT CASE(NumberOfNodesPerElement)
-        CASE(3)
-          ! Linear triangle
-          NumberOfBoundaryPatchComponents = 4_INTG
-        CASE(4)
-          ! Linear quadrilateral
-          NumberOfBoundaryPatchComponents = 4_INTG
-        CASE(6)
-          ! Quadratic triangle
-          NumberOfBoundaryPatchComponents = 5_INTG
-        CASE(9)
-          ! Quadratic quadrilateral
-          NumberOfBoundaryPatchComponents = 5_INTG
-        CASE DEFAULT
-          CALL FlagError("Unknown 2D mesh type for method: "//TRIM(Method), Err, Error, *999)
-        END SELECT
-      CASE(3)
-        SELECT CASE(NumberOfNodesPerElement)
-        CASE(4)
-          ! Linear tetrahedron
-          NumberOfBoundaryPatchComponents = 5_INTG
-        CASE(8)
-          ! Linear hexahedron
-          NumberOfBoundaryPatchComponents = 6_INTG
-        CASE(10)
-          ! Quadratic tetrahedron
-          NumberOfBoundaryPatchComponents = 8_INTG
-        CASE(27)
-          ! Quadratic hexahedron
-          NumberOfBoundaryPatchComponents = 11_INTG
-        CASE DEFAULT
-          CALL FlagError("Unknown 3D mesh type for method: "//TRIM(Method), Err, Error, *999)
-        END SELECT
-      CASE DEFAULT
-        CALL FlagError("1D mesh import not supported for method: "//TRIM(Method), Err, Error, *999)
-      END SELECT
-
-      ! Close files
+      ALLOCATE(IntValuesT(NumberOfNodesPerElement),STAT=Err)
+      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+      ! Close files and re-open them to start reading at beginning
       CLOSE(NodeFileUnit)
       CLOSE(ElementFileUnit)
       CLOSE(BoundaryFileUnit)
-    ELSE
-      CALL FlagError("Invalid mesh import type. Valid types are: CHeart", Err, Error, *999)
-    END IF
-
-    EXITS("cmfe_ReadMeshInfo")
-
-    RETURN
-999 ERRORSEXITS("cmfe_ReadMeshInfo", Err, Error)
-    CALL cmfe_HandleError(Err, Error)
-    RETURN
-
-  END SUBROUTINE cmfe_ReadMeshInfo
-  
-  !
-  !================================================================================================================================
-  !
-  ! This routine reads input mesh files in CHeart X/T/B format and stores them in arrays
-  ! Note: this routine makes use of the Fortran 2008 feature to obtain a file unit that is free
-  ! Note: Need to call cmfe_ReadMeshInfo beforehand, where sanity checks have been done
-  SUBROUTINE cmfe_ReadMeshFiles(Filename, Nodes, Elements, BoundaryPatches, Method, Err)
-    ! IN / OUT variables
-    CHARACTER(LEN=*),   INTENT(IN)  :: Filename             !< The file name to import the mesh data from
-    REAL(DP),           INTENT(OUT) :: Nodes(:,:)           !< The coordinates of the mesh nodes
-    INTEGER(INTG),      INTENT(OUT) :: Elements(:,:)        !< The node IDs for each element
-    INTEGER(INTG),      INTENT(OUT) :: BoundaryPatches(:)   !< The boundary patch labels for all boundary nodes
-    CHARACTER(LEN=*),   INTENT(IN)  :: Method               !<The export method to use, e.g, CHeart, Cmgui, etc.
-    INTEGER(INTG),      INTENT(OUT) :: Err                  !<The error code.
-    ! Local variables
-    TYPE(VARYING_STRING)            :: VFileName,VMethod
-    INTEGER(INTG)                   :: FilenameLength,MethodLength
-    INTEGER(INTG)                   :: NodeFileUnit,ElementFileUnit,BoundaryFileUnit
-    INTEGER(INTG)                   :: NumberOfNodes,NumberOfDimensions
-    INTEGER(INTG)                   :: NumberOfElements,NumberOfNodesPerElement
-    INTEGER(INTG)                   :: NumberOfBoundaryPatches,NumberOfBoundaryPatchComponents
-    INTEGER(INTG)                   :: IntValue,CurrentIdx,ComponentIdx,PatchIdx,CurrentPatchID,Offset,Idx
-    INTEGER(INTG), ALLOCATABLE      :: Permutation(:),IntValuesT(:),IntValuesB(:),BoundaryPatchesTemp(:,:)
-    INTEGER(INTG)                   :: NumberOfPatchIDs
-    INTEGER(INTG)                   :: PatchIDs(25),NumberOfNodesPerPatchID(25),CurrentFirstPatchIdx(25)
-
-    ENTERS("cmfe_ReadMeshFiles", Err, Error, *999)
-
-    ! Initialize variables
-    PatchIDs                = -1_INTG ! default, not present
-    NumberOfNodesPerPatchID =  0_INTG
-    NumberOfPatchIDs        =  0_INTG
-
-    ! Get file name and method name
-    FilenameLength  = LEN_TRIM(Filename)
-    VFilename       = Filename(1:FilenameLength)
-    MethodLength    = LEN_TRIM(Method)
-    VMethod         = Method(1:MethodLength)
-
-    ! Reading the X/T/B files from CHeart file format
-    IF(VMethod=="CHeart") THEN
-
-      ! Get mesh info
-      NumberOfNodes                   = SIZE(Nodes,1)
-      NumberOfDimensions              = SIZE(Nodes,2)
-      NumberOfElements                = SIZE(Elements,1)
-      NumberOfNodesPerElement         = SIZE(Elements,2)
-
-      ! Figure out which node IDs we have to swap
+      OPEN(NEWUNIT=NodeFileUnit,     FILE=CHAR(VFilename)//".X", ACTION="read")
+      OPEN(NEWUNIT=ElementFileUnit,  FILE=CHAR(VFilename)//".T", ACTION="read")
+      OPEN(NEWUNIT=BoundaryFileUnit, FILE=CHAR(VFilename)//".B", ACTION="read")
+      !=========================================================================
+      ! Figure out:
+      ! - how many components the boundary file has
+      ! - the mapping between different node order conventions CHeart -> OpenCMISS-iron
       ALLOCATE(Permutation(NumberOfNodesPerElement),STAT=Err)
-      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
-      ALLOCATE(IntValuesT(NumberOfNodesPerElement),STAT=Err)
       IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
       SELECT CASE(NumberOfDimensions)
       CASE(2)
@@ -63026,14 +62942,22 @@ CONTAINS
       CASE DEFAULT
         CALL FlagError("1D mesh import not supported for method: "//TRIM(Method), Err, Error, *999)
       END SELECT
+      !=========================================================================
+      ! Now, allocate node, elements, boundary patch variables
+      ALLOCATE(Nodes(NumberOfNodes,NumberOfDimensions),STAT=Err)
+      IF(Err/=0) CALL FlagError("Can not allocate memory.", Err, Error, *999)
+      ALLOCATE(Elements(NumberOfElements,NumberOfNodesPerElement),STAT=Err)
+      IF(Err/=0) CALL FlagError("Can not allocate memory.", Err, Error, *999)
       ALLOCATE(IntValuesB(NumberOfBoundaryPatchComponents),STAT=Err)
       IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
-      
-      ! Get available file units (Fortran 2008 feature)
-      OPEN(NEWUNIT=NodeFileUnit,     FILE=CHAR(VFilename)//".X", ACTION="read")
-      OPEN(NEWUNIT=ElementFileUnit,  FILE=CHAR(VFilename)//".T", ACTION="read")
-      OPEN(NEWUNIT=BoundaryFileUnit, FILE=CHAR(VFilename)//".B", ACTION="read")
-
+      ALLOCATE(BoundaryPatchesTemp(NumberOfBoundaryPatches,NumberOfBoundaryPatchComponents),STAT=Err)
+      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+      !=========================================================================
+      ! Skip header line and read all other lines in the node file
+      READ(NodeFileUnit,*) IntValue
+      DO CurrentIdx=1,NumberOfNodes
+        READ(NodeFileUnit,*) Nodes(CurrentIdx,:)
+      END DO
       ! Skip header line and read all other lines in the element file
       READ(ElementFileUnit,*) IntValue
       DO CurrentIdx=1,NumberOfElements
@@ -63042,17 +62966,9 @@ CONTAINS
           Elements(CurrentIdx,Idx)  = IntValuesT(Permutation(Idx))
         END DO
       END DO
-
-      ! Skip header line and read all other lines in the node file
-      READ(NodeFileUnit,*) IntValue
-      DO CurrentIdx=1,NumberOfNodes
-        READ(NodeFileUnit,*) Nodes(CurrentIdx,:)
-      END DO
-
+      !=========================================================================
       ! Skip header line and read all other lines in the boundary file
-      READ(BoundaryFileUnit,*) NumberOfBoundaryPatches
-      ALLOCATE(BoundaryPatchesTemp(NumberOfBoundaryPatches,NumberOfBoundaryPatchComponents),STAT=Err)
-      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
+      READ(BoundaryFileUnit,*) IntValue
       ! First of all, let's read all the boundary patches in a temporary variable and count the number of unique boundary patch IDs
       DO CurrentIdx=1,NumberOfBoundaryPatches
         READ(BoundaryFileUnit,*) BoundaryPatchesTemp(CurrentIdx,:)
@@ -63071,6 +62987,9 @@ CONTAINS
           END IF
         END DO
       END DO
+      ! Now transform boundary patches to a common format
+      ALLOCATE(BoundaryPatches(1+2*NumberOfPatchIDs+NumberOfBoundaryPatches*(NumberOfBoundaryPatchComponents-2_INTG)),STAT=Err)
+      IF(Err/=0) CALL FlagError("Could not allocate memory.",Err,Error,*999)
       ! Set the number of patch IDs
       BoundaryPatches(1)    = NumberOfPatchIDs
       CurrentFirstPatchIdx  = 1_INTG+2*NumberOfPatchIDs+1_INTG
@@ -63096,29 +63015,31 @@ CONTAINS
         END DO
        CurrentFirstPatchIdx(PatchIdx)=CurrentFirstPatchIdx(PatchIdx)+NumberOfBoundaryPatchComponents-2_INTG
       END DO
-
+      !=========================================================================
       ! Close files
       CLOSE(NodeFileUnit)
       CLOSE(ElementFileUnit)
       CLOSE(BoundaryFileUnit)
+      !=========================================================================
     ELSE
       CALL FlagError("Invalid mesh import type. Valid types are: CHeart", Err, Error, *999)
     END IF
 
+    !===========================================================================
     ! Deallocate temporary variables
     IF(ALLOCATED(Permutation))          DEALLOCATE(Permutation)
     IF(ALLOCATED(IntValuesT))           DEALLOCATE(IntValuesT)
     IF(ALLOCATED(IntValuesB))           DEALLOCATE(IntValuesB)
     IF(ALLOCATED(BoundaryPatchesTemp))  DEALLOCATE(BoundaryPatchesTemp)
 
-    EXITS("cmfe_ReadMeshFiles")
+    EXITS("cmfe_ReadMesh")
 
     RETURN
-999 ERRORSEXITS("cmfe_ReadMeshFiles", Err, Error)
+999 ERRORSEXITS("cmfe_ReadMesh", Err, Error)
     CALL cmfe_HandleError(Err, Error)
     RETURN
 
-  END SUBROUTINE cmfe_ReadMeshFiles
+  END SUBROUTINE cmfe_ReadMesh
 
   !
   !================================================================================================================================
