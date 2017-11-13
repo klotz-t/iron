@@ -81,7 +81,7 @@ MODULE SOLVER_ROUTINES
 !-from Aaron:----------
   LOGICAL, PUBLIC :: DEBUG_MODE_A = .FALSE.
   LOGICAL, PUBLIC :: run_survey = .FALSE.
-  LOGICAL, PUBLIC :: survey2 = .TRUE.
+  LOGICAL, PUBLIC :: survey2 = .FALSE.
 
   ! Timing variables
   REAL(DP), PUBLIC :: TIMING_ODE_SOLVER = 0_DP
