@@ -555,12 +555,24 @@ CONTAINS
           IF(ASSOCIATED(TIME_LOOP)) THEN
             !Set the current time to be the start time. Solvers should use the first time step to do any initialisation.
             TIME_LOOP%CURRENT_TIME=TIME_LOOP%START_TIME
+            
+            !Precompute the number of iterations from total time span and time increment if it was not specified explicitely 
+            IF (TIME_LOOP%NUMBER_OF_ITERATIONS==0) THEN
+              TIME_LOOP%NUMBER_OF_ITERATIONS=CEILING((TIME_LOOP%STOP_TIME-TIME_LOOP%START_TIME)/TIME_LOOP%TIME_INCREMENT)
+            !If number of iterations was specified but does not match TIME_INCREMENT, e.g. TIME_INCREMENT is still at the default value, compute correct TIME_INCREMENT
+            ELSEIF (CEILING((TIME_LOOP%STOP_TIME-TIME_LOOP%START_TIME)/TIME_LOOP%TIME_INCREMENT) &
+              & /= TIME_LOOP%NUMBER_OF_ITERATIONS) THEN
+              TIME_LOOP%TIME_INCREMENT = (TIME_LOOP%STOP_TIME-TIME_LOOP%START_TIME)/TIME_LOOP%NUMBER_OF_ITERATIONS
+            ENDIF
+            
             TIME_LOOP%ITERATION_NUMBER=0
-            ! actual time loop
-            DO WHILE(TIME_LOOP%CURRENT_TIME<TIME_LOOP%STOP_TIME)
-              IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT .AND. COMPUTATIONAL_NODE_NUMBER_GET(ERR,ERROR) == 0) THEN
+
+            DO WHILE(TIME_LOOP%ITERATION_NUMBER<TIME_LOOP%NUMBER_OF_ITERATIONS)
+              IF(CONTROL_LOOP%OUTPUT_TYPE>=CONTROL_LOOP_PROGRESS_OUTPUT) THEN
                 CALL WRITE_STRING(GENERAL_OUTPUT_TYPE,"",ERR,ERROR,*999)
-                CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"Time control loop iteration: ",TIME_LOOP%ITERATION_NUMBER, &
+                CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"Time control loop iteration:  ",TIME_LOOP%ITERATION_NUMBER, &
+                  & ERR,ERROR,*999)
+                CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"  Total number of iterations: ",TIME_LOOP%NUMBER_OF_ITERATIONS, &
                   & ERR,ERROR,*999)
                 CALL WRITE_STRING_VALUE(GENERAL_OUTPUT_TYPE,"  Current time   = ",TIME_LOOP%CURRENT_TIME, &
                   & ERR,ERROR,*999)
@@ -2532,7 +2544,6 @@ CONTAINS
 #ifdef USE_CUSTOM_PROFILING
             CALL CustomProfilingStart("level 2: 1D solve")
 #endif
-
             CALL Problem_SolverEquationsDynamicLinearSolve(SOLVER_EQUATIONS,ERR,ERROR,*999)
 
 #ifdef USE_CUSTOM_PROFILING
@@ -3209,6 +3220,12 @@ CONTAINS
     TYPE(VARYING_STRING), INTENT(OUT) :: ERROR !<The error string
     !Local Variables
     
+    TYPE(EULER_DAE_SOLVER_TYPE), POINTER :: EULER_SOLVER
+    TYPE(IMPROVED_EULER_DAE_SOLVER_TYPE), POINTER :: IMPROVED_EULER_SOLVER
+    TYPE(DAE_SOLVER_TYPE), POINTER :: DAE_SOLVER, DAE_SOLVER0
+    TYPE(EULER_DAE_SOLVER_TYPE), POINTER :: EULER_SOLVER0
+    TYPE(SOLVER_TYPE), POINTER :: DSOLVER
+    
     ENTERS("PROBLEM_SOLVER_SOLVE",ERR,ERROR,*999)
     
     IF(ASSOCIATED(SOLVER)) THEN
@@ -3225,7 +3242,25 @@ CONTAINS
 #ifdef USE_CUSTOM_PROFILING
       CALL CustomProfilingStart("level 2: solver overhead")     ! at this point reached by 0D and 1D solvers and 3D nonlinear solver
 #endif
+          
       CALL PROBLEM_SOLVER_PRE_SOLVE(SOLVER,ERR,ERROR,*999)
+      
+      !IF(ASSOCIATED(SOLVER)) THEN
+      !  DAE_SOLVER0=>SOLVER%DAE_SOLVER
+      !  IF(ASSOCIATED(DAE_SOLVER0)) THEN
+      !    EULER_SOLVER0=>DAE_SOLVER0%EULER_SOLVER
+      !    IF(ASSOCIATED(EULER_SOLVER0)) THEN
+      !      IMPROVED_EULER_SOLVER=>EULER_SOLVER0%IMPROVED_EULER_SOLVER
+      !      IF(ASSOCIATED(IMPROVED_EULER_SOLVER)) THEN
+      !        EULER_SOLVER=>IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER
+      !        IF(ASSOCIATED(EULER_SOLVER)) THEN
+      !          DAE_SOLVER=>EULER_SOLVER%DAE_SOLVER
+      !          PRINT *, "-> DAE_SOLVER%START_TIME=", DAE_SOLVER%START_TIME, ", DAE_SOLVER%END_TIME=",DAE_SOLVER%END_TIME
+      !        ENDIF
+      !      ENDIF
+      !    ENDIF
+      !  ENDIF
+      !ENDIF 
       
 #ifdef USE_CUSTOM_PROFILING
       CALL CustomProfilingStop("level 2: solver overhead")    ! at this point reached by 0D and 1D solvers and 3D nonlinear solver
@@ -3248,7 +3283,6 @@ CONTAINS
 #ifdef USE_CUSTOM_PROFILING
           CALL CustomProfilingStart("level 2: 0D solve")
 #endif
-
           CALL PROBLEM_CELLML_EQUATIONS_SOLVE(SOLVER%CELLML_EQUATIONS,ERR,ERROR,*999)
 
 #ifdef USE_CUSTOM_PROFILING
