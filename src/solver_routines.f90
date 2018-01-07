@@ -81,6 +81,7 @@ MODULE SOLVER_ROUTINES
 !-from Aaron:----------
   LOGICAL, PUBLIC :: DEBUG_MODE_A = .FALSE.
   LOGICAL, PUBLIC :: run_survey = .FALSE.
+  LOGICAL, PUBLIC :: survey2 = .FALSE.
 
   ! Timing variables
   REAL(DP), PUBLIC :: TIMING_ODE_SOLVER = 0_DP
@@ -2412,6 +2413,28 @@ CONTAINS
                         ENDIF
                         
                       ENDIF ! run_survey
+                      
+                      IF(survey2 .AND. FORWARD_EULER_SOLVER%EULER_DAE_SOLVER%ITERATOR==1) THEN
+                        CALL CPU_TIME(STARTT)
+                        IF(dof_idx==16 .AND. TIME_STEP==1) THEN
+                          WRITE(*,*) "Reached Euler integration start for 1st time."
+                          WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                          WRITE(*,*) " "
+                        ENDIF
+                      ELSEIF(survey2 .AND. FORWARD_EULER_SOLVER%EULER_DAE_SOLVER%ITERATOR==2) THEN
+                        IF(dof_idx==16 .AND. TIME_STEP==1) THEN
+                          WRITE(*,*) "Reached Euler integration start for 2nd time."
+                          WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                          WRITE(*,*) " "
+                        ENDIF
+                      ELSEIF(survey2) THEN
+                        IF(dof_idx==16 .AND. TIME_STEP==1) THEN
+                          WRITE(*,*) "Reached Euler integration start."
+                          WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                          WRITE(*,*) " "
+                        ENDIF
+                      ENDIF
+                                            
                      ! up to this point
 #ifdef TAUPROF
                             CALL TAU_STATIC_PHASE_START('cellml call rhs')
@@ -2473,7 +2496,49 @@ CONTAINS
                             ENDIF
                             ! in vector segment STATE_DATA(856:912) sind die Daten für dof_idx==16 und TIME_STEP==TS_NUMBER
                           ENDIF ! run_survey
-                          ! up to this point
+                          
+                          IF(survey2 .AND. FORWARD_EULER_SOLVER%EULER_DAE_SOLVER%ITERATOR==1) THEN
+                            IF(dof_idx==16 .AND. TIME_STEP==TS_NUMBER) THEN
+                              WRITE(*,*) "Reached Euler integration end for 1st time."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ELSEIF(survey2 .AND. FORWARD_EULER_SOLVER%EULER_DAE_SOLVER%ITERATOR==2) THEN
+                            IF(dof_idx==16 .AND. TIME_STEP==TS_NUMBER) THEN
+                              WRITE(*,*) "Reached Euler integration end for 2nd time."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ELSEIF(survey2) THEN
+                           IF(dof_idx==16 .AND. TIME_STEP==TS_NUMBER) THEN
+                              WRITE(*,*) "Reached Euler integration end."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ENDIF                     
+                          ! the following detects wheter we are at the time to measure convergence.  
+                          IF(dof_idx==1 .AND. TIME_STEP==1) THEN
+                            FINISHT=& ! serves as slot ..
+           &FORWARD_EULER_SOLVER%EULER_DAE_SOLVER%dae_solver%solver%solvers%control_loop%parent_loop%time_loop%stop_time 
+                          ENDIF
+                          IF(survey2 .AND. FINISHT > 0.1) THEN
+                              !WRITE(*,*) FINISHT ! over..
+                              !CALL CPU_TIME(FINISHT)
+                              STATE_START_DOF=(16-1)*MAX_NUMBER_STATES+1 ! faking "dof_idx==16" 
+                              inquire(file="ConvAll.txt", exist=exist_B)
+                              if (exist_B) then
+                                open(1248, file="ConvAll.txt", status="old", position="append", action="write")
+                              else
+                                open(1248, file="ConvAll.txt", status="new", action="write")
+                              end if
+                              WRITE(1248,'(i4)',advance='no') TS_NUMBER
+                              !WRITE(1248,'(A,G19.12)',advance='no') " CPU-time ",FINISHT-STARTT
+                              WRITE(1248,'(A,G19.12)',advance='yes') " Euler ",STATE_DATA(STATE_START_DOF)
+                              close(1248)
+                              STOP
+                          ENDIF
+                          
+                        ! up to this point
                           
                         ENDDO !dof_idx
                       ENDDO !TIME_STEP
@@ -2871,8 +2936,10 @@ CONTAINS
 !#ifdef USE_CUSTOM_PROFILING
 !                      CALL CustomProfilingStart('1.1.4. cellml integrate')
 !#endif
-                      EULER_SOLVER%Iterator=EULER_SOLVER%Iterator+1
-                      !PRINT *, "Iteration ",EULER_SOLVER%Iterator,":"
+                      IF(run_survey .OR. survey2) THEN
+                        EULER_SOLVER%Iterator=EULER_SOLVER%Iterator+1
+                        PRINT *, "Iteration ",EULER_SOLVER%Iterator,":"
+                      ENDIF
                       !Integrate these CellML equations
                       CALL SOLVER_DAE_EULER_FORWARD_INTEGRATE(FORWARD_EULER_SOLVER,CELLML_ENVIRONMENT,MODELS_VARIABLE% &
                         & TOTAL_NUMBER_OF_DOFS,DAE_SOLVER%START_TIME,DAE_SOLVER%END_TIME,DAE_SOLVER%INITIAL_STEP, &
@@ -3084,7 +3151,7 @@ CONTAINS
     ELSE
       TS_NUMBER = IMPROVED_EULER_SOLVER%TIME_STEPS_NUMBER
     ENDIF
-    TIME_INCREMENT = (END_TIME-START_TIME)/TS_NUMBER
+    TIME_INCREMENT = (END_TIME-START_TIME)/TS_NUMBER ! care: this overwrites the initial (global/user) value
     !--------------------------------------------------------------------------------------------------
 
     IF(ASSOCIATED(IMPROVED_EULER_SOLVER)) THEN
@@ -3390,6 +3457,44 @@ CONTAINS
                                model_idx=MODELS_DATA(1)
                              ENDIF
                            ENDIF ! run_survey
+                              
+                          IF(survey2 .AND. IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER%ITERATOR==1) THEN
+                            !  CALL CPU_TIME(STARTT)
+                            IF(dof_idx==16 .AND. TIME_STEP==1) THEN
+                              WRITE(*,*) "Reached Heun integration start for 1st time."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ELSEIF(survey2 .AND. IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER%ITERATOR==2) THEN
+                            IF(dof_idx==16 .AND. TIME_STEP==1) THEN
+                              WRITE(*,*) "Reached Heun integration start for 2nd time."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ELSEIF(survey2) THEN
+                            IF(dof_idx==16 .AND. TIME_STEP==1) THEN
+                              WRITE(*,*) "Reached Heun integration start."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ENDIF
+                          IF(dof_idx==1 .AND. TIME_STEP==1) THEN
+                            FINISHT=& ! serves as slot
+                   &IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER%dae_solver%solver%solvers%control_loop%parent_loop%time_loop%stop_time
+                          ENDIF
+                          IF(survey2 .AND. FINISHT > 0.1) THEN
+                              STATE_START_DOF=(16-1)*MAX_NUMBER_STATES+1 ! faking "dof_idx==16" 
+                              inquire(file="ConvAll.txt", exist=exist_B)
+                              if (exist_B) then
+                                open(1248, file="ConvAll.txt", status="old", position="append", action="write")
+                              else
+                                open(1248, file="ConvAll.txt", status="new", action="write")
+                              end if
+                              WRITE(1248,'(i4)',advance='no') TS_NUMBER
+                              WRITE(1248,'(A,G19.12)',advance='yes') " Heun  ",STATE_DATA(STATE_START_DOF)
+                              close(1248)
+                              STOP
+                          ENDIF
                            ! up to this point
 #ifdef TAUPROF
                             CALL TAU_STATIC_PHASE_START('cellml call rhs')
@@ -3494,6 +3599,43 @@ CONTAINS
                               GO TO 999
                             ENDIF
                           ENDIF
+                          IF(survey2 .AND. IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER%ITERATOR==1) THEN
+                            IF(dof_idx==16 .AND. TIME_STEP==TS_NUMBER) THEN
+                              WRITE(*,*) "Reached Heun integration end for 1st time."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ELSEIF(survey2 .AND. IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER%ITERATOR==2) THEN
+                            IF(dof_idx==16 .AND. TIME_STEP==TS_NUMBER) THEN
+                              WRITE(*,*) "Reached Heun integration end for 2nd time."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ELSEIF(survey2) THEN
+                            IF(dof_idx==16 .AND. TIME_STEP==TS_NUMBER) THEN
+                              WRITE(*,*) "Reached Heun integration end."
+                              WRITE(*,'(A,G19.12)') "    V_m = ",STATE_DATA(STATE_START_DOF)
+                              WRITE(*,*) " "
+                            ENDIF
+                          ENDIF
+                          ! the following detects wheter we are at the time to measure convergence.
+     !                     IF(dof_idx==1 .AND. TIME_STEP==1) THEN
+     !                       FINISHT=& ! serves as slot
+     !      &IMPROVED_EULER_SOLVER%EULER_DAE_SOLVER%dae_solver%solver%solvers%control_loop%parent_loop%time_loop%stop_time 
+     !                     ENDIF
+     !                     IF(survey2 .AND. FINISHT > 0.1) THEN
+     !                         STATE_START_DOF=(16-1)*MAX_NUMBER_STATES+1 ! faking "dof_idx==16" 
+     !                         inquire(file="ConvAll.txt", exist=exist_B)
+     !                         if (exist_B) then
+     !                           open(1248, file="ConvAll.txt", status="old", position="append", action="write")
+     !                         else
+     !                           open(1248, file="ConvAll.txt", status="new", action="write")
+     !                         end if
+     !                         WRITE(1248,'(i4)',advance='no') TS_NUMBER
+     !                         WRITE(1248,'(A,G19.12)',advance='yes') " Heun  ",STATE_DATA(STATE_START_DOF)
+     !                         close(1248)
+     !                         STOP
+     !                     ENDIF
                           ! up to this point
                         ENDDO !dof_idx
                       ENDDO !TIME_STEP
@@ -3926,7 +4068,7 @@ CONTAINS
 !#ifdef USE_CUSTOM_PROFILING
 !                      CALL CustomProfilingStart('1.1.4. cellml integrate')
 !#endif
-                      IF(run_survey) THEN
+                      IF(run_survey .OR. survey2) THEN
                         EULER_SOLVER%Iterator=EULER_SOLVER%Iterator+1
                         PRINT *, "Iteration ",EULER_SOLVER%Iterator,":"
                       ENDIF ! runs_survey
