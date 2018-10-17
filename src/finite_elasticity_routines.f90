@@ -3591,7 +3591,7 @@ CONTAINS
         & EQUATIONS_SET_ANISOTROPIC_POLYNOMIAL_SUBTYPE,EQUATIONS_SET_ANISOTROPIC_POLYNOMIAL_ACTIVE_SUBTYPE, &
         & EQUATIONS_SET_ACTIVECONTRACTION_SUBTYPE,EQUATIONS_SET_NO_SUBTYPE,EQUATIONS_SET_1D3D_MONODOMAIN_ELASTICITY_SUBTYPE, &
         & EQUATIONS_SET_MONODOMAIN_ELASTICITY_W_TITIN_SUBTYPE,EQUATIONS_SET_MONODOMAIN_ELASTICITY_VELOCITY_SUBTYPE, &
-	& EQUATIONS_SET_MONODOMAIN_ELASTICITY_MUSCLE_TENDON_SUBTYPE, &
+	      & EQUATIONS_SET_MONODOMAIN_ELASTICITY_MUSCLE_TENDON_SUBTYPE, &
         & EQUATIONS_SET_INCOMPRESSIBLE_FINITE_ELASTICITY_DARCY_SUBTYPE,EQUATIONS_SET_ELASTICITY_DARCY_INRIA_MODEL_SUBTYPE, &
         & EQUATIONS_SET_INCOMPRESSIBLE_ELASTICITY_DRIVEN_DARCY_SUBTYPE, &
         & EQUATIONS_SET_ORTHOTROPIC_MATERIAL_HOLZAPFEL_OGDEN_SUBTYPE, &
@@ -6101,6 +6101,56 @@ CONTAINS
 
       !PIOLA_TENSOR(2,2)=PIOLA_TENSOR(2,2)+TITIN_VALUE_CROSS_FIBRE
       !PIOLA_TENSOR(3,3)=PIOLA_TENSOR(3,3)+TITIN_VALUE_CROSS_FIBRE
+      
+      
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      !!!!!!!!!!!!!!!!!!!!! This is only tempory dirty coding !!!!!
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      PIOLA_TENSOR = 0.0_DP
+      
+      F_a_inv=0.0_DP
+      F_a_inv(1,1)=1.0_DP/C(5)
+      F_a_inv(2,2)=1.0_DP
+      F_a_inv(3,3)=1.0_DP
+      
+      
+      CALL MatrixProduct(DZDNU,F_a_inv,F_e,err,error,*999)
+      CALL MatrixTranspose(F_e,F_e_T,err,error,*999)
+      CALL MatrixProduct(F_e_T,F_e,TEMP,err,error,*999)
+      
+      
+!      TEMP = AZL
+      CALL DSYEV('V','U',3,TEMP,3,EVALUES,WORK,-1,ERR)
+      IF(ERR.NE.0) CALL FlagError("Error in Eigenvalue computation",ERR,ERROR,*999)
+      LWORK=MIN(LWMAX,INT(WORK(1)))
+      CALL DSYEV('V','U',3,TEMP,3,EVALUES,WORK,LWORK,ERR)
+      IF(ERR.NE.0) CALL FlagError("Error in Eigenvalue computation",ERR,ERROR,*999)
+      EVECTOR_1=TEMP(:,1)
+      EVECTOR_2=TEMP(:,2)
+      EVECTOR_3=TEMP(:,3)
+
+      DO i=1,3
+	      DO j=1,3
+		      EMATRIX_1(i,j)=EVECTOR_1(i)*EVECTOR_1(j)
+		      EMATRIX_2(i,j)=EVECTOR_2(i)*EVECTOR_2(j)
+		      EMATRIX_3(i,j)=EVECTOR_3(i)*EVECTOR_3(j)
+	      END DO
+      END DO
+
+      !PIOLA_TENSOR=0.0_DP
+      PIOLA_TENSOR= & ! PIOLA_TENSOR+ &
+	      & EVALUES(1)**(C(2)/2.0_DP-1.0_DP)*EMATRIX_1+ &
+	      & EVALUES(2)**(C(2)/2.0_DP-1.0_DP)*EMATRIX_2+ &
+	      & EVALUES(3)**(C(2)/2.0_DP-1.0_DP)*EMATRIX_3
+      PIOLA_TENSOR=PIOLA_TENSOR*C(1)-1.0_DP*P*AZU
+      
+      
+      PIOLA_TENSOR(1,1) = PIOLA_TENSOR(1,1) + C(3)/SQRT(AZL(1,1))*C(4)
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      
+      
+      
       
     CASE(EQUATIONS_SET_MOONEY_RIVLIN_SUBTYPE,EQUATIONS_SET_MOONEY_RIVLIN_ACTIVECONTRACTION_SUBTYPE,EQUATIONS_SET_MEMBRANE_SUBTYPE,&
       & EQUATIONS_SET_NO_SUBTYPE,EQUATIONS_SET_ANISOTROPIC_POLYNOMIAL_SUBTYPE,EQUATIONS_SET_ANISOTROPIC_POLYNOMIAL_ACTIVE_SUBTYPE,&
